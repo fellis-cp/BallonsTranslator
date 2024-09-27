@@ -277,7 +277,7 @@ class GoogleTranslator(GoogleTransBase):
 @register_translator('google')
 class TransGoogle(BaseTranslator):
 
-    concate_text = True
+    concate_text = False
     params: Dict = {
         'delay': 0.0,
     }
@@ -318,5 +318,17 @@ class TransGoogle(BaseTranslator):
         self.googletrans._url_params['tl'] = self.lang_map[self.lang_target]
         self.googletrans.__base_url = "https://translate.google.com/m"
         translations = [self.googletrans.translate(t) for t in src_list]
+
+        '''
+        Add time delay for request translations
+        sleep(float(self.params['delay']))
+        '''  
+
+        '''
+        change the def translate function in modules/BaseTranslator if needed
+        def translate(self, src_list: List[str]) -> List[str]:
+            return [self._translate(text) for text in src_list]
+        '''
+
 
         return translations
