@@ -3,7 +3,7 @@ from typing import Any, Callable
 from qtpy.QtWidgets import QVBoxLayout, QPushButton, QComboBox, QLabel, QHBoxLayout
 from qtpy.QtCore import Signal, Qt, QRectF
 
-from .custom_widget import PanelGroupBox, PanelArea, ComboBox, QFontChecker
+from .custom_widget import PanelGroupBox, PanelArea, ComboBox, QFontChecker, SmallParamLabel, SmallComboBox
 from utils.fontformat import FontFormat
 
 
@@ -18,7 +18,7 @@ class TextAdvancedFormatPanel(PanelArea):
 
         self.active_format: FontFormat = None
 
-        self.linespacing_type_combobox = ComboBox(
+        self.linespacing_type_combobox = SmallComboBox(
             parent=self,
             options=[
                 self.tr("Proportional"),
@@ -28,7 +28,7 @@ class TextAdvancedFormatPanel(PanelArea):
         self.linespacing_type_combobox.activated.connect(
             lambda:  self.on_format_changed('line_spacing_type', self.linespacing_type_combobox.currentIndex)
         )
-        linespacing_type_label = QLabel(self.tr('Line Spacing Type: '))
+        linespacing_type_label = SmallParamLabel(self.tr('Line Spacing Type'))
         linespacing_type_layout = QHBoxLayout()
         linespacing_type_layout.addWidget(linespacing_type_label)
         linespacing_type_layout.addWidget(self.linespacing_type_combobox)

@@ -307,6 +307,10 @@ class ProjImgTrans:
         return len(self.pages) == 0
 
     @property
+    def is_all_pages_no_text(self):
+        return all([len(blklist) == 0 for blklist in self.pages.values()])
+
+    @property
     def img_valid(self):
         return self.img_array is not None
     

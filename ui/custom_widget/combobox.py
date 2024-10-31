@@ -25,6 +25,10 @@ class ComboBox(QComboBox):
             return super().wheelEvent(*args, **kwargs)
         else:
             return self.scrollWidget.wheelEvent(*args, **kwargs)
+        
+
+class SmallComboBox(ComboBox):
+    pass
 
 
 class ConfigComboBox(ComboBox):

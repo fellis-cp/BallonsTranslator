@@ -6,6 +6,7 @@ from qtpy.QtCore import  Qt, QPropertyAnimation, QEasingCurve, Signal
 from qtpy.QtGui import QMouseEvent, QWheelEvent, QColor
 
 
+from utils.shared import CONFIG_FONTSIZE_CONTENT
 
 class FadeLabel(QLabel):
     def __init__(self, *args, **kwargs):
@@ -141,3 +142,33 @@ class TextCheckerLabel(QLabel):
             self.checkStateChanged.emit(self.checked)
 
 
+class ParamNameLabel(QLabel):
+    def __init__(self, param_name: str, alignment = None, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        if alignment is None:
+            self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        else:
+            self.setAlignment(alignment)
+
+        font = self.font()
+        font.setPointSizeF(CONFIG_FONTSIZE_CONTENT-2)
+        self.setFont(font)
+        self.setText(param_name)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+
+class SmallParamLabel(QLabel):
+    def __init__(self, param_name: str, alignment = None, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        if alignment is None:
+            self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        else:
+            self.setAlignment(alignment)
+
+        # font = self.font()
+        # font.setPointSizeF(CONFIG_FONTSIZE_CONTENT-2)
+        # self.setFont(font)
+        self.setText(param_name)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)

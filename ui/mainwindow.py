@@ -278,7 +278,7 @@ class MainWindow(mainwindow_cls):
         module_manager.blktrans_pipeline_finished.connect(self.on_blktrans_finished)
         module_manager.imgtrans_thread.post_process_mask = self.drawingPanel.rectPanel.post_process_mask
 
-        self.leftBar.run_imgtrans.connect(self.on_run_imgtrans)
+        self.leftBar.run_imgtrans_clicked.connect(self.run_imgtrans)
         self.bottomBar.inpaint_btn_clicked.connect(self.inpaintBtnClicked)
         self.bottomBar.translatorStatusbtn.clicked.connect(self.translatorStatusBtnPressed)
         self.bottomBar.transTranspageBtn.run_target.connect(self.on_transpagebtn_pressed)
@@ -1077,11 +1077,17 @@ class MainWindow(mainwindow_cls):
             self.set_display_lang(lang)
 
     def run_imgtrans(self):
+        if not self.imgtrans_proj.is_all_pages_no_text:
+            reply = QMessageBox.question(self, self.tr('Confirmation'),
+                                         self.tr('Are you sure to run image translation again?\nAll existing translation results will be cleared!'),
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
         self.on_run_imgtrans()
 
     def run_imgtrans_wo_textstyle_update(self):
         self._run_imgtrans_wo_textstyle_update = True
-        self.on_run_imgtrans()
+        self.run_imgtrans()
 
     def on_run_imgtrans(self):
         self.backup_blkstyles.clear()
@@ -1321,7 +1327,7 @@ class MainWindow(mainwindow_cls):
                 shared.pbar['translate'] = tqdm(range(npages), desc="Translation")
             if pcfg.module.enable_inpaint:
                 shared.pbar['inpaint'] = tqdm(range(npages), desc="Inpaint")
-        self.run_imgtrans()
+        self.on_run_imgtrans()
 
     def on_create_errdialog(self, error_msg: str, detail_traceback: str = '', exception_type: str = ''):
         try:

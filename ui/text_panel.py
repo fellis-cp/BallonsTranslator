@@ -12,7 +12,6 @@ from utils.fontformat import FontFormat, px2pt, LineSpacingType
 from .custom_widget import Widget, ColorPickerLabel, ClickableLabel, CheckableLabel, TextCheckerLabel, AlignmentChecker, QFontChecker, SizeComboBox
 from .textitem import TextBlkItem
 from .text_graphical_effect import TextEffectPanelDeprecated
-from .text_effect import TextEffectPanel
 from .text_advanced_format import TextAdvancedFormatPanel
 from .text_style_presets import TextStylePresetPanel
 from . import funcmaps as FM

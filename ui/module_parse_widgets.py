@@ -3,7 +3,7 @@ from typing import List, Callable
 from modules import GET_VALID_INPAINTERS, GET_VALID_TEXTDETECTORS, GET_VALID_TRANSLATORS, GET_VALID_OCR, \
     BaseTranslator, DEFAULT_DEVICE, GPUINTENSIVE_SET
 from utils.logger import logger as LOGGER
-from .custom_widget import ConfigComboBox, ParamComboBox, NoBorderPushBtn
+from .custom_widget import ConfigComboBox, ParamComboBox, NoBorderPushBtn, ParamNameLabel
 from utils.shared import CONFIG_FONTSIZE_CONTENT, CONFIG_COMBOBOX_MIDEAN, CONFIG_COMBOBOX_LONG, CONFIG_COMBOBOX_SHORT, CONFIG_COMBOBOX_HEIGHT
 from utils.config import pcfg
 
@@ -11,21 +11,6 @@ from qtpy.QtWidgets import QPlainTextEdit, QHBoxLayout, QVBoxLayout, QWidget, QL
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QDoubleValidator
 
-
-class ParamNameLabel(QLabel):
-    def __init__(self, param_name: str, alignment = None, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-        if alignment is None:
-            self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        else:
-            self.setAlignment(alignment)
-
-        font = self.font()
-        font.setPointSizeF(CONFIG_FONTSIZE_CONTENT-2)
-        self.setFont(font)
-        self.setText(param_name)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
 class ParamLineEditor(QLineEdit):
     

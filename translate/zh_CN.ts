@@ -885,6 +885,12 @@
         <source>Failed to load project from</source>
         <translation>无法从所选路径加载项目：</translation>
     </message>
+    <message>
+        <location filename="../ui/mainwindow.py" line="1081"/>
+        <source>Are you sure to run image translation again?
+All existing translation results will be cleared!</source>
+        <translation>确定要重新运行吗？现有翻译结果将被清空！</translation>
+    </message>
 </context>
 <context>
     <name>ModuleManager</name>

@@ -322,8 +322,12 @@ QMenu::item:selected {
 }
 
 QDialog {
-    font-size: 7px;
+    font-size: 14px;
     background-color: @widgetBackgroundColor;
+}
+
+QDialog QPushButton {
+    padding: 5px 15px;
 }
 
 QGroupBox {
@@ -1000,6 +1004,19 @@ PanelGroupBox::title {
 
 TextStyleLabel {
     border-radius: 7px;
+}
+
+SmallParamLabel {
+    font-size: 12px;
+    height: 20px;
+}
+
+SmallComboBox {
+    height: 20px;
+    font-size: 12px;
+    /* padding-left: 8px; */
+    border: 1px solid @borderColor;
+    background-color: @transtexteditBackgroundColor;
 }
 
 ArrowLeftButton {
