@@ -440,6 +440,7 @@ class SceneTextManager(QObject):
         self.pairwidget_list.clear()
 
     def updateSceneTextitems(self):
+        self.hovering_transwidget = None
         self.txtblkShapeControl.setBlkItem(None)
         self.clearSceneTextitems()
         for textblock in self.imgtrans_proj.current_block_list():

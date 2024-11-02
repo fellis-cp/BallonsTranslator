@@ -269,8 +269,9 @@ Then stop, without any other explanations or notes.
         self.logger.debug(f'openai response: \n {response}')
 
         if OPENAPI_V1_API:
-            self.token_count += response.usage.total_tokens
-            self.token_count_last = response.usage.total_tokens
+            if response.usage is not None:
+                self.token_count += response.usage.total_tokens
+                self.token_count_last = response.usage.total_tokens
         else:
             self.token_count += response.usage['total_tokens']
             self.token_count_last = response.usage['total_tokens']

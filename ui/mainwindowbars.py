@@ -154,6 +154,9 @@ class LeftBar(Widget):
         actionExportTranslationMD = QAction(self.tr("Export translation as markdown"), self)
         self.export_trans_md = actionExportTranslationMD.triggered
 
+        actionImportTranslationTxt = QAction(self.tr("Import translation from TXT/markdown"), self)
+        self.import_trans_txt = actionImportTranslationTxt.triggered
+
         self.recentMenu = QMenu(self.tr("Open Recent"), self)
         
         openMenu = QMenu(self)
@@ -168,6 +171,7 @@ class LeftBar(Widget):
             actionExportTranslationTxt,
             actionExportSrcMD,
             actionExportTranslationMD,
+            actionImportTranslationTxt,
         ])
         self.openBtn = OpenBtn()
         self.openBtn.setFixedSize(LEFTBTN_WIDTH, LEFTBTN_WIDTH)
@@ -335,7 +339,7 @@ class TitleBar(Widget):
 
         replaceMTkeyword = QAction(self.tr("Keyword substitution for machine translation"), self)
         self.replaceMTkeyword_trigger = replaceMTkeyword.triggered
-        replaceOCRkeyword = QAction(self.tr("Keyword substitution for OCR results"), self)
+        replaceOCRkeyword = QAction(self.tr("Keyword substitution for source text"), self)
         self.replaceOCRkeyword_trigger = replaceOCRkeyword.triggered
 
         editMenu = QMenu(self.editToolBtn)

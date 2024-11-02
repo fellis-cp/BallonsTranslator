@@ -14,7 +14,7 @@ from utils.logger import logger as LOGGER
 from utils.text_processing import is_cjk, full_len, half_len
 from utils.textblock import TextBlock, TextAlignment
 from utils import shared
-from utils import create_error_dialog
+from utils import create_error_dialog, create_info_dialog
 from modules.translators.trans_chatgpt import GPTTranslator
 from .misc import parse_stylesheet, set_html_family, QKEY
 from utils.config import ProgramConfig, pcfg, save_config, text_styles, save_text_styles, load_textstyle_from, FontFormat
@@ -123,7 +123,7 @@ class MainWindow(mainwindow_cls):
         self.setMinimumWidth(screen_size.width() // 2)
         self.configPanel = ConfigPanel(self)
         self.configPanel.trans_config_panel.show_MT_keyword_window.connect(self.show_MT_keyword_window)
-        self.configPanel.ocr_config_panel.show_OCR_keyword_window.connect(self.show_OCR_keyword_window)
+        self.configPanel.trans_config_panel.show_OCR_keyword_window.connect(self.show_OCR_keyword_window)
 
         self.leftBar = LeftBar(self)
         self.leftBar.showPageListLabel.clicked.connect(self.pageLabelStateChanged)
@@ -139,6 +139,7 @@ class MainWindow(mainwindow_cls):
         self.leftBar.export_trans_txt.connect(lambda : self.on_export_txt(dump_target='translation'))
         self.leftBar.export_src_md.connect(lambda : self.on_export_txt(dump_target='source', suffix='.md'))
         self.leftBar.export_trans_md.connect(lambda : self.on_export_txt(dump_target='translation', suffix='.md'))
+        self.leftBar.import_trans_txt.connect(self.on_import_trans_txt)
 
         self.pageList = PageListView()
         self.pageList.reveal_file.connect(self.on_reveal_file)
@@ -197,7 +198,7 @@ class MainWindow(mainwindow_cls):
         self.textPanel.formatpanel.textstyle_panel.export_style.connect(self.export_tstyles)
         self.textPanel.formatpanel.textstyle_panel.import_style.connect(self.import_tstyles)
 
-        self.ocrSubWidget = KeywordSubWidget(self.tr("Keyword substitution for OCR"))
+        self.ocrSubWidget = KeywordSubWidget(self.tr("Keyword substitution for source text"))
         self.ocrSubWidget.setParent(self)
         self.ocrSubWidget.setWindowFlags(Qt.WindowType.Window)
         self.ocrSubWidget.hide()
@@ -476,7 +477,6 @@ class MainWindow(mainwindow_cls):
             self.imgtrans_proj.set_current_img(item.text())
             self.canvas.clear_undostack(update_saved_step=True)
             self.canvas.updateCanvas()
-            self.st_manager.hovering_transwidget = None
             self.st_manager.updateSceneTextitems()
             self.titleBar.setTitleContent(page_name=self.imgtrans_proj.current_img)
             self.module_manager.handle_page_changed()
@@ -1186,7 +1186,41 @@ class MainWindow(mainwindow_cls):
             msg.setText(self.tr('Text file exported to ') + self.imgtrans_proj.dump_txt_path(dump_target, suffix))
             msg.exec_()
         except Exception as e:
-            create_error_dialog(e, self.tr('failed to export as TEXT file'))
+            create_error_dialog(e, self.tr('Failed to export as TEXT file'))
+
+    def on_import_trans_txt(self):
+        try:
+            selected_file = ''
+            dialog = QFileDialog()
+            selected_file = str(dialog.getOpenFileUrl(self.parent(), self.tr('Import *.md/*.txt'), filter="*.txt *.md *.TXT *.MD")[0].toLocalFile())
+            if not osp.exists(selected_file):
+                return
+
+            all_matched, match_rst = self.imgtrans_proj.load_translation_from_txt(selected_file)
+            matched_pages = match_rst['matched_pages']
+
+            if self.imgtrans_proj.current_img in matched_pages:
+                self.canvas.clear_undostack(update_saved_step=True)
+                self.st_manager.updateSceneTextitems()
+
+            if all_matched:
+                msg = self.tr('Translation imported and matched successfully.')
+            else:
+                msg = self.tr('Imported txt file not fully matched with current project, please make sure source txt file structured like results from \"export TXT/markdown\"')
+                if len(match_rst['missing_pages']) > 0:
+                    msg += '\n' + self.tr('Missing pages: ') + '\n'
+                    msg += '\n'.join(match_rst['missing_pages'])
+                if len(match_rst['unexpected_pages']) > 0:
+                    msg += '\n' + self.tr('Unexpected pages: ') + '\n'
+                    msg += '\n'.join(match_rst['unexpected_pages'])
+                if len(match_rst['unmatched_pages']) > 0:
+                    msg += '\n' + self.tr('Unmatched pages: ') + '\n'
+                    msg += '\n'.join(match_rst['unmatched_pages'])
+                msg = msg.strip()
+            create_info_dialog(msg)
+
+        except Exception as e:
+            create_error_dialog(e, self.tr('Failed to import translation from ') + selected_file)
 
     def on_reveal_file(self):
         current_img_path = self.imgtrans_proj.current_img_path()

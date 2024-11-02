@@ -26,6 +26,39 @@ def read_jpg_metadata(imgpath: str):
     bubdict = json.loads(user_comment)
     return bubdict
 
+page_start_pattern = re.compile(r'^###\s+', re.MULTILINE)
+text_blkid_start_pattern = re.compile(r'^\d+\.', re.MULTILINE)
+
+def parse_txt_translation(file_path: str):
+    with open(file_path, 'r', encoding='utf8') as f:
+        content = f.read()
+    page_start = None
+    page_list = []
+    for matched in page_start_pattern.finditer(content):
+        start, end = matched.span()
+        if page_start is not None:
+            page_list.append({'page_content': content[page_start: start]})
+        page_start = start
+    if page_start is not None:
+        page_list.append({'page_content': content[page_start:]})
+
+    for page_dict in page_list:
+        page_content = page_dict['page_content']
+        page_dict['page_name'] = page_start_pattern.sub('', page_content.split('\n')[0]).strip()
+        blkid_start = blkid_end = None
+        blk_list = []
+        for matched in text_blkid_start_pattern.finditer(page_content):
+            start, end = matched.span()
+            if blkid_start is not None:
+                blk_list.append(page_content[blkid_end: start].strip())
+            blkid_start = start
+            blkid_end = end
+        if blkid_start is not None:
+            blk_list.append(page_content[blkid_end:])
+        page_dict['blk_list'] = blk_list
+
+    return page_list
+
 
 class TextBlkEncoder(NumpyEncoder):
     def default(self, obj):
@@ -138,6 +171,40 @@ class ProjImgTrans:
         if set_img_failed:
             if len(self.pages) > 0:
                 self.set_current_img_byidx(0)
+
+    def load_translation_from_txt(self, file_path: str):
+        page_list = parse_txt_translation(file_path)
+        missing_pages = []
+        unmatched_pages = []
+        unexpected_pages = []
+        matched_pages = []
+        for page_dict in page_list:
+            page_name = page_dict['page_name']
+            if page_name in self.pages:
+                matched_pages.append(page_name)
+            else:
+                unexpected_pages.append(page_name)
+                continue
+            blklist = self.pages[page_name]
+            n_blk = len(blklist)
+            src_blk_list = page_dict['blk_list']
+            n_src_blk = len(src_blk_list)
+            if n_src_blk != n_blk:
+                LOGGER.warning(f'Unmatched text blocks in {page_name}, number of text blocks in this page vs source file: {n_blk}-{n_src_blk}')
+                unmatched_pages.append(page_name)
+            for blkid in range(min(n_blk, n_src_blk)):
+                blk = blklist[blkid]
+                blk.rich_text = ''
+                blk.translation = src_blk_list[blkid]
+
+        matched_pages = set(matched_pages)
+        if len(matched_pages) != self.num_pages:
+            for page_name in self.pages:
+                if page_name not in matched_pages:
+                    missing_pages.append(page_name)
+        
+        all_matched = len(missing_pages) == 0 and len(unmatched_pages) == 0 and len(unexpected_pages) == 0
+        return all_matched, {'missing_pages': missing_pages, 'unmatched_pages': unmatched_pages, 'unexpected_pages': unexpected_pages, 'matched_pages': matched_pages}
 
     def load_from_json(self, json_path: str):
         old_dir = self.directory

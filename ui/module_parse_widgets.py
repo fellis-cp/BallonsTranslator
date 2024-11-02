@@ -313,6 +313,7 @@ class ModuleConfigParseWidget(QWidget):
 class TranslatorConfigPanel(ModuleConfigParseWidget):
 
     show_MT_keyword_window = Signal()
+    show_OCR_keyword_window = Signal()
 
     def __init__(self, module_name, scrollWidget: QWidget = None, *args, **kwargs) -> None:
         super().__init__(module_name, GET_VALID_TRANSLATORS, scrollWidget=scrollWidget, *args, **kwargs)
@@ -323,6 +324,9 @@ class TranslatorConfigPanel(ModuleConfigParseWidget):
         self.replaceMTkeywordBtn = NoBorderPushBtn(self.tr("Keyword substitution for machine translation"), self)
         self.replaceMTkeywordBtn.clicked.connect(self.show_MT_keyword_window)
         self.replaceMTkeywordBtn.setFixedWidth(500)
+        self.replaceOCRkeywordBtn = NoBorderPushBtn(self.tr("Keyword substitution for source text"), self)
+        self.replaceOCRkeywordBtn.clicked.connect(self.show_OCR_keyword_window)
+        self.replaceOCRkeywordBtn.setFixedWidth(500)
 
         st_layout = QHBoxLayout()
         st_layout.setSpacing(15)
@@ -333,6 +337,7 @@ class TranslatorConfigPanel(ModuleConfigParseWidget):
         st_layout.addWidget(self.target_combobox)
         
         self.vlayout.insertLayout(1, st_layout) 
+        self.vlayout.addWidget(self.replaceOCRkeywordBtn)
         self.vlayout.addWidget(self.replaceMTkeywordBtn)
 
     def finishSetTranslator(self, translator: BaseTranslator):
@@ -378,22 +383,12 @@ class TextDetectConfigPanel(ModuleConfigParseWidget):
 
 
 class OCRConfigPanel(ModuleConfigParseWidget):
-    
-    show_OCR_keyword_window = Signal()
-
     def __init__(self, module_name: str, scrollWidget: QWidget = None, *args, **kwargs) -> None:
         super().__init__(module_name, GET_VALID_OCR, scrollWidget = scrollWidget, *args, **kwargs)
         self.ocr_changed = self.module_changed
         self.setOCR = self.setModule
-
-        self.replaceOCRkeywordBtn = NoBorderPushBtn(self.tr("Keyword substitution for OCR results"), self)
-        self.replaceOCRkeywordBtn.clicked.connect(self.show_OCR_keyword_window)
-        self.replaceOCRkeywordBtn.setFixedWidth(500)
-
         self.restoreEmptyOCRChecker = QCheckBox(self.tr("Delete and restore region where OCR return empty string."), self)
         self.restoreEmptyOCRChecker.clicked.connect(self.on_restore_empty_ocr)
-
-        self.vlayout.addWidget(self.replaceOCRkeywordBtn)
         self.vlayout.addWidget(self.restoreEmptyOCRChecker)
 
     def on_restore_empty_ocr(self):
