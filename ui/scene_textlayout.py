@@ -59,7 +59,7 @@ def get_char_width(char: str, ffamily: str, size: float, weight: int, italic: bo
     fm = _font_metrics(ffamily, size, weight, italic)
     return fm.horizontalAdvance(char)
 
-def punc_actual_rect(line: QTextLine, family: str, size: float, weight: int, italic: bool, stroke_width: float, h: int = None, w: int = None) -> List[int]:
+def punc_actual_rect(line: QTextLine, family: str, size: float, weight: int, italic: bool, stroke_width: float, h: int = None, w: int = None, space_shift = 0) -> List[int]:
     if h is None:
         h = int(line.height())
     if w is None:
@@ -67,7 +67,7 @@ def punc_actual_rect(line: QTextLine, family: str, size: float, weight: int, ita
     pixmap = QImage(w * 2, h * 2, QImage.Format.Format_ARGB32)
     pixmap.fill(Qt.GlobalColor.transparent)
     p = QPainter(pixmap)
-    line.draw(p, QPointF(-line.x(), -line.y()))
+    line.draw(p, QPointF(-line.x() - space_shift, -line.y()))
     p.end()
     mask = pixmap2ndarray(pixmap, keep_alpha=True)
     if mask is None:
@@ -84,12 +84,12 @@ def punc_actual_rect(line: QTextLine, family: str, size: float, weight: int, ita
     return ar
 
 @lru_cache(maxsize=2048)
-def punc_actual_rect_cached(line: LruIgnoreArg, char: str, family: str, size: float, weight: int, italic: bool, stroke_width: float, h: int, w: int) -> List[int]:
+def punc_actual_rect_cached(cached_args: LruIgnoreArg, char: str, family: str, size: float, weight: int, italic: bool, stroke_width: float, h: int, w: int) -> List[int]:
     '''
     char is actually not used, but can be set as some cache flag
     '''
     # QtextLine line is invisibale to lru
-    return punc_actual_rect(line.line, family, size, weight, italic, stroke_width, h, w)
+    return punc_actual_rect(cached_args.line, family, size, weight, italic, stroke_width, h, w, cached_args.space_shift)
 
 
 class CharFontFormat:
@@ -134,12 +134,12 @@ class CharFontFormat:
     def size(self) -> float:
         return self.font.pointSizeF()
 
-    def punc_actual_rect(self, line: QTextLine, char: str, cache=False, stroke_width=0, h=None, w=None) -> List[int]:
+    def punc_actual_rect(self, line: QTextLine, char: str, cache=False, stroke_width=0, h=None, w=None, space_shift=0) -> List[int]:
         if cache:
-            line = LruIgnoreArg(line=line)
-            ar = punc_actual_rect_cached(line, char, self.family, self.size, self.weight, self.font.italic(), stroke_width, h, w)
+            cached_args = LruIgnoreArg(line=line, space_shift=space_shift)
+            ar = punc_actual_rect_cached(cached_args, char, self.family, self.size, self.weight, self.font.italic(), stroke_width, h, w)
         else:
-            ar =  punc_actual_rect(line, self.family, self.size, self.weight, self.font.italic(), stroke_width, h, w)
+            ar =  punc_actual_rect(line, self.family, self.size, self.weight, self.font.italic(), stroke_width, h, w, space_shift)
         return ar
 
 
@@ -450,10 +450,12 @@ class VerticalTextDocumentLayout(SceneTextLayout):
                         yoff = -non_bracket_br[1] - non_bracket_br[3]
                         yoff = yoff - (line_width - non_bracket_br[3]) / 2
 
-                # elif vertical_force_aligncentel(char):
-                else:
+                elif vertical_force_aligncentel(char):
+                    space_shift = 0
+                    if num_lspaces > 0:
+                        space_shift = num_lspaces * cfmt.space_width
                     # other characters will simply be aligned center for this line
-                    act_rect = cfmt.punc_actual_rect(line, char, cache=True)
+                    act_rect = cfmt.punc_actual_rect(line, char, cache=True, space_shift=space_shift)
                     if vertical_force_aligncentel(char):
                         yoff = -act_rect[1]
                     else:
@@ -463,13 +465,22 @@ class VerticalTextDocumentLayout(SceneTextLayout):
                     #     yoff = yoff + (cfmt.tbr.height() - act_rect[3]) / 2
                     
                     if num_lspaces > 0:
-                        natral_shifted = num_lspaces * cfmt.space_width
-                        xoff -= natral_shifted
-                        yoff += natral_shifted
+                        xoff -= space_shift
+                        yoff += space_shift
 
                     if char in PUNSET_ALIGNCENTER:
                         tbr, br = cfmt.punc_rect(char)
                         yoff += (tbr.height() + cfmt.font_metrics.descent() - act_rect[3]) / 2
+
+                else:
+                    empty_spacing = num_lspaces * cfmt.space_width
+                    if TEXTLAYOUT_QTVERSION:
+                        xshift = max(line.naturalTextWidth() - cfmt.br.width(), 0)
+                    else:
+                        xshift = empty_spacing
+                        
+                    xoff = -xshift
+                    yoff = min(cfmt.br.top() - cfmt.tbr.top(), -cfmt.tbr.top() - line.ascent()) + empty_spacing
 
                 xy_offsets[0], xy_offsets[1] = xoff, yoff
             block = block.next()
@@ -705,6 +716,9 @@ class VerticalTextDocumentLayout(SceneTextLayout):
 
             if char_idx < blk_text_len:
                 cfmt = self.get_char_fontfmt(block_no, char_idx)
+                space_shift = 0
+                if num_lspaces > 0:
+                    space_shift = num_lspaces * cfmt.space_width
                 line_char_ids.append(char_idx)
                 space_w = cfmt.space_width
                 let_sp_offset = cfmt.tbr.height() * (ls - 1)
@@ -726,7 +740,7 @@ class VerticalTextDocumentLayout(SceneTextLayout):
                     tbr_h += let_sp_offset
                 elif vertical_force_aligncentel(char):
                     if char not in PUNSET_ALIGNCENTER:
-                        tbr_h = cfmt.punc_actual_rect(line, char, cache=True)[3]
+                        tbr_h = cfmt.punc_actual_rect(line, char, cache=True, space_shift=space_shift)[3]
                     else:
                         tbr, br = cfmt.punc_rect(char)
                         tbr_h = tbr.height() + cfmt.font_metrics.descent()
