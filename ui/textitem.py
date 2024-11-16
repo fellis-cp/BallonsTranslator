@@ -139,19 +139,10 @@ class TextBlkItem(QGraphicsTextItem):
             self.update()
 
     def paint_stroke(self, painter: QPainter):
-        doc = self.document().clone()
-        doc.setDocumentMargin(self.padding())
-        layout = VerticalTextDocumentLayout(doc, self.fontformat) if self.fontformat.vertical \
-            else HorizontalTextDocumentLayout(doc, self.fontformat)
-        layout._draw_offset = self.layout._draw_offset
-        layout.line_spacing = self.fontformat.line_spacing
-        layout.letter_spacing = self.fontformat.letter_spacing
-        layout._is_painting_stroke = True
-        rect = self.rect()
-        layout.setMaxSize(rect.width(), rect.height(), False)
-        doc.setDocumentLayout(layout)
-
-        layout.relayout_on_changed = False
+        doc = QTextDocument()
+        doc.setDocumentMargin(self.document().documentMargin())
+        doc.setDefaultFont(self.document().defaultFont())
+        doc.setHtml(self.document().toHtml())
         cursor = QTextCursor(doc)
         block = doc.firstBlock()
         stroke_pen = QPen(self.stroke_qcolor, 0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
@@ -170,6 +161,17 @@ class TextBlkItem(QGraphicsTextItem):
                 cursor.mergeCharFormat(cfmt)
                 it += 1
             block = block.next()
+
+        layout = VerticalTextDocumentLayout(doc, self.fontformat) if self.fontformat.vertical \
+            else HorizontalTextDocumentLayout(doc, self.fontformat)
+        layout._draw_offset = self.layout._draw_offset
+        layout.line_spacing = self.fontformat.line_spacing
+        layout.letter_spacing = self.fontformat.letter_spacing
+        layout._is_painting_stroke = True
+        layout.setMaxSize(self.layout.max_width, self.layout.max_height, False)
+        doc.setDocumentLayout(layout)
+
+        layout.relayout_on_changed = False
         doc.drawContents(painter)
 
     def repaint_background(self):
