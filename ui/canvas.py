@@ -77,8 +77,6 @@ class CustomGV(QGraphicsView):
 
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        # self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def wheelEvent(self, event : QWheelEvent) -> None:
         # qgraphicsview always scroll content according to wheelevent
@@ -921,7 +919,8 @@ class Canvas(QGraphicsScene):
         self.text_undo_stack.redo()
 
     def undo_textedit(self):
-        self.num_pushed_textstep -= 1
+        if self.num_pushed_textstep > 0:
+            self.num_pushed_textstep -= 1
         self.text_undo_stack.undo()
 
     def redo(self):
@@ -943,11 +942,13 @@ class Canvas(QGraphicsScene):
     def undo(self):
         if self.textEditMode():
             undo_stack = self.text_undo_stack
-            self.num_pushed_textstep -= 1
+            if self.num_pushed_textstep > 0:
+                self.num_pushed_textstep -= 1
             self.on_textstack_changed()
         elif self.drawMode():
             undo_stack = self.draw_undo_stack
-            self.num_pushed_drawstep -= 1
+            if self.num_pushed_drawstep > 0:
+                self.num_pushed_drawstep -= 1
             self.on_drawstack_changed()
         else:
             return

@@ -5,7 +5,6 @@ import cv2
 from typing import List
 
 import httpx
-from httpx_socks import SyncProxyTransport
 from PIL import Image
 import io
 import json5
@@ -35,16 +34,8 @@ class LensCore:
 
     def _send_request(self, url, headers, files):
         try:
-            if self.proxy:
-                if self.proxy.startswith('socks5://') or self.proxy.startswith('socks4://'):
-                    transport = SyncProxyTransport.from_url(self.proxy)
-                    client = httpx.Client(transport=transport)
-                    response = client.post(url, headers=headers, files=files)
-                else:
-                    response = httpx.post(url, headers=headers, files=files, proxies=self.proxy)
-            else:
-                response = httpx.post(url, headers=headers, files=files)
-
+            client = httpx.Client(proxies=self.proxy) if self.proxy else httpx.Client()
+            response = client.post(url, headers=headers, files=files)
             if response.status_code != 200:
                 raise Exception(f"Failed to upload image. Status code: {response.status_code}")
             return response

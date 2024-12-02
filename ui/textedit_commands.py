@@ -267,9 +267,11 @@ class TextItemEditCommand(QUndoCommand):
         self.blkitem = blkitem
         self.num_steps = min(num_steps, 2)
         if blkitem.input_method_from == -1:
-            self.num_steps = 1
+            if not blkitem.is_formatting:
+                self.num_steps = 1
         else:
             blkitem.input_method_from = -1
+        self.is_formatting = blkitem.is_formatting
 
     def redo(self):
         if self.op_counter == 0:
@@ -277,7 +279,7 @@ class TextItemEditCommand(QUndoCommand):
             return
         for _ in range(self.num_steps):
             self.blkitem.redo()
-        if self.edit is not None:
+        if self.edit is not None and not self.is_formatting:
             self.edit.redo()
 
     def undo(self):

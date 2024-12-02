@@ -43,6 +43,8 @@ parser.add_argument("--requirements", default='requirements.txt')
 parser.add_argument("--headless", action='store_true', help='run without GUI')
 parser.add_argument("--exec_dirs", default='', help='translation queue (project directories) separated by comma')
 parser.add_argument("--ldpi", default=None, type=float, help='logical dots perinch')
+parser.add_argument("--export-translation-txt", action='store_true', help='save translation to txt file once RUN completed')
+parser.add_argument("--export-source-txt", action='store_true', help='save source to txt file once RUN completed')
 args, _ = parser.parse_known_args()
 
 
@@ -161,6 +163,7 @@ def main():
     from utils import config as program_config
 
     from qtpy.QtCore import QTranslator, QLocale, Qt
+    shared.args = args
     shared.DEFAULT_DISPLAY_LANG = QLocale.system().name().replace('en_CN', 'zh_CN')
     shared.HEADLESS = args.headless
     shared.load_cache()

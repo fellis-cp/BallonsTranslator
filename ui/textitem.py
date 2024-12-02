@@ -62,6 +62,7 @@ class TextBlkItem(QGraphicsTextItem):
         self.input_method_from = -1
         self.input_method_text = ''
         self.block_all_input = False
+        self.block_change_signal = False
 
         self.layout: Union[VerticalTextDocumentLayout, HorizontalTextDocumentLayout] = None
         self.document().setDocumentMargin(0)
@@ -85,7 +86,7 @@ class TextBlkItem(QGraphicsTextItem):
         return self.textInteractionFlags() == Qt.TextInteractionFlag.TextEditorInteraction
 
     def on_content_changed(self):
-        if (self.hasFocus() or self.is_formatting) and not self.pre_editing:   
+        if (self.hasFocus() or self.is_formatting) and not self.pre_editing and not self.block_change_signal:   
             # self.content_changed.emit(self)
             if not self.in_redo_undo:
 
@@ -143,9 +144,11 @@ class TextBlkItem(QGraphicsTextItem):
         doc.setDocumentMargin(self.document().documentMargin())
         doc.setDefaultFont(self.document().defaultFont())
         doc.setHtml(self.document().toHtml())
+        doc.setDefaultTextOption(self.document().defaultTextOption())
         cursor = QTextCursor(doc)
         block = doc.firstBlock()
         stroke_pen = QPen(self.stroke_qcolor, 0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        letter_spacing = self.fontformat.letter_spacing * 100
         while block.isValid():
             it = block.begin()
             while not it.atEnd():
@@ -158,6 +161,9 @@ class TextBlkItem(QGraphicsTextItem):
                 cursor.setPosition(pos1)
                 cursor.setPosition(pos2, QTextCursor.MoveMode.KeepAnchor)
                 cfmt.setTextOutline(stroke_pen)
+                if letter_spacing != 100 and not self.fontformat.vertical:
+                    cfmt.setFontLetterSpacingType(QFont.SpacingType.PercentageSpacing)
+                    cfmt.setFontLetterSpacing(letter_spacing)
                 cursor.mergeCharFormat(cfmt)
                 it += 1
             block = block.next()
@@ -165,8 +171,6 @@ class TextBlkItem(QGraphicsTextItem):
         layout = VerticalTextDocumentLayout(doc, self.fontformat) if self.fontformat.vertical \
             else HorizontalTextDocumentLayout(doc, self.fontformat)
         layout._draw_offset = self.layout._draw_offset
-        layout.line_spacing = self.fontformat.line_spacing
-        layout.letter_spacing = self.fontformat.letter_spacing
         layout._is_painting_stroke = True
         layout.setMaxSize(self.layout.max_width, self.layout.max_height, False)
         doc.setDocumentLayout(layout)
@@ -226,8 +230,7 @@ class TextBlkItem(QGraphicsTextItem):
             bx1, by1, bx2, by2 = xyxy
             xywh = np.array([[bx1, by1, bx2-bx1, by2-by1]])
             blk.lines = xywh2xyxypoly(xywh).reshape(-1, 4, 2).tolist()
-        init_html = blk.rich_text if blk.rich_text else blk.get_text()
-        self.setVertical(blk.vertical, init_html)
+        self.setVertical(blk.vertical)
         self.setRect(blk.bounding_rect())
         
         if blk.angle != 0:
@@ -363,56 +366,41 @@ class TextBlkItem(QGraphicsTextItem):
             self.setRotation(angle)
         self.blk.angle = angle
 
-    def setVertical(self, vertical: bool, init_html: str = None):
+    def setVertical(self, vertical: bool):
         if self.fontformat is not None:
             self.fontformat.vertical = vertical
 
         valid_layout = True
+        doc = self.document()
         if self.layout is not None:
             if isinstance(self.layout, VerticalTextDocumentLayout) == vertical:
                 return
+            self.layout.size_enlarged.disconnect(self.on_document_enlarged)
+            self.layout.documentSizeChanged.disconnect(self.docSizeChanged)
         else:
             valid_layout = False
+            doc.contentsChanged.connect(self.on_content_changed)
+            doc.contentsChange.connect(self.on_content_changing)
 
         if valid_layout:
             rect = self.rect() if self.layout is not None else None
         
         self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-        doc = self.document()
-        html = doc.toHtml()
-        doc_margin = doc.documentMargin()
-        doc.blockSignals(True)
         doc.documentLayout().blockSignals(True)
-        default_font = doc.defaultFont()
-
-        doc = QTextDocument()
-        doc.setDocumentMargin(doc_margin)
-        if not valid_layout and init_html is not None:
-            doc.setHtml(html)
         if vertical:
             layout = VerticalTextDocumentLayout(doc, self.fontformat)
         else:
             layout = HorizontalTextDocumentLayout(doc, self.fontformat)
         
         self.layout = layout
-        self.setDocument(doc)
         doc.setDocumentLayout(layout)
-        doc.setDefaultFont(default_font)
-        doc.contentsChanged.connect(self.on_content_changed)
-        doc.contentsChange.connect(self.on_content_changing)
         layout.size_enlarged.connect(self.on_document_enlarged)
         layout.documentSizeChanged.connect(self.docSizeChanged)
         
         if valid_layout:
             layout.setMaxSize(rect.width(), rect.height())
-            doc.setHtml(html)
-
             self.setCenterTransform()
             self.repaint_background()
-
-            if self.fontformat.letter_spacing != 1:
-                self.setLetterSpacing(self.fontformat.letter_spacing, force=True)
-
         self.doc_size_changed.emit(self.idx)
 
     def updateUndoSteps(self):
@@ -444,6 +432,11 @@ class TextBlkItem(QGraphicsTextItem):
                     e.accept()
                     self.pasted.emit(self.idx)
                     return
+        elif e.modifiers() == Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier:
+            if e.key() == Qt.Key.Key_Z:
+                e.accept()
+                self.redo_signal.emit()
+                return
         elif e.key() == Qt.Key.Key_Return:
             e.accept()
             self.textCursor().insertText('\n')
@@ -646,12 +639,15 @@ class TextBlkItem(QGraphicsTextItem):
         self.blk.fontformat.merge(fmt)
 
     def set_cursor_cfmt(self, cursor: QTextCursor, cfmt: QTextCharFormat, merge_char: bool = False):
+        doc_is_empty = self.document().isEmpty()
         if merge_char:
+            self.block_change_signal = True
             cursor.mergeCharFormat(cfmt)
+            self.block_change_signal = False
         cursor.mergeBlockCharFormat(cfmt)
         cursor.clearSelection()
         self.setTextCursor(cursor)
-        if self.document().isEmpty():
+        if doc_is_empty:
             self.document().setDefaultFont(cursor.blockCharFormat().font())
 
     def _before_set_ffmt(self, set_selected: bool, restore_cursor: bool):
@@ -814,7 +810,7 @@ class TextBlkItem(QGraphicsTextItem):
 
         self.fontformat.stroke_width = stroke_width
         if stroke_width > 0 and padding:
-            p = self.layout.max_font_size(to_px=True) * stroke_width / 2
+            p = self.layout.max_font_size(to_px=True) * (stroke_width + 0.05) / 2
             self.setPadding(p)
 
         self._after_set_ffmt(cursor, repaint_background, restore_cursor, **after_kwargs)
@@ -833,7 +829,8 @@ class TextBlkItem(QGraphicsTextItem):
         if repaint_background:
             fs = pt2px(max(self.layout.max_font_size(), value))
             self.layout.relayout_on_changed = False
-            self.setPadding(fs * self.fontformat.stroke_width / 2)
+            if self.fontformat.stroke_width > 0:
+                self.setPadding(fs * (self.fontformat.stroke_width + 0.05) / 2)
             self.layout.relayout_on_changed = True
         cfmt = QTextCharFormat()
         cfmt.setFontPointSize(value)

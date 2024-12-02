@@ -277,6 +277,11 @@ class SourceTextEdit(QTextEdit):
             elif e.key() == Qt.Key.Key_V:
                 self.paste_flag = True
                 return super().keyPressEvent(e)
+        elif e.modifiers() == Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier:
+            if e.key() == Qt.Key.Key_Z:
+                e.accept()
+                self.redo_signal.emit()
+                return
         elif e.key() == Qt.Key.Key_Return:
             e.accept()
             self.textCursor().insertText('\n')

@@ -34,6 +34,7 @@ preview
 If you don't want to install Python and Git by yourself and have access to the Internet:  
 Download BallonsTranslator_dev_src_with_gitpython.7z from [MEGA](https://mega.nz/folder/gmhmACoD#dkVlZ2nphOkU5-2ACb5dKw) or [Google Drive](https://drive.google.com/drive/folders/1uElIYRLNakJj-YS0Kd3r3HE-wzeEvrWd?usp=sharing), unzip it and run launch_win.bat.   
 Run scripts/local_gitpull.bat to get the latest update.
+Note these provided packages cannot run on Windows 7, Win 7 users need to install [Python 3.8](https://www.python.org/downloads/release/python-3810/) and run the source code.
 
 ## Run the source code
 

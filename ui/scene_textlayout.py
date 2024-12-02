@@ -450,7 +450,7 @@ class VerticalTextDocumentLayout(SceneTextLayout):
                         yoff = -non_bracket_br[1] - non_bracket_br[3]
                         yoff = yoff - (line_width - non_bracket_br[3]) / 2
 
-                elif vertical_force_aligncentel(char):
+                else:
                     space_shift = 0
                     if num_lspaces > 0:
                         space_shift = num_lspaces * cfmt.space_width
@@ -472,15 +472,15 @@ class VerticalTextDocumentLayout(SceneTextLayout):
                         tbr, br = cfmt.punc_rect(char)
                         yoff += (tbr.height() + cfmt.font_metrics.descent() - act_rect[3]) / 2
 
-                else:
-                    empty_spacing = num_lspaces * cfmt.space_width
-                    if TEXTLAYOUT_QTVERSION:
-                        xshift = max(line.naturalTextWidth() - cfmt.br.width(), 0)
-                    else:
-                        xshift = empty_spacing
+                # else:
+                #     empty_spacing = num_lspaces * cfmt.space_width
+                #     if TEXTLAYOUT_QTVERSION:
+                #         xshift = max(line.naturalTextWidth() - cfmt.br.width(), 0)
+                #     else:
+                #         xshift = empty_spacing
                         
-                    xoff = -xshift
-                    yoff = min(cfmt.br.top() - cfmt.tbr.top(), -cfmt.tbr.top() - line.ascent()) + empty_spacing
+                #     xoff = -xshift
+                #     yoff = min(cfmt.br.top() - cfmt.tbr.top(), -cfmt.tbr.top() - line.ascent()) + empty_spacing
 
                 xy_offsets[0], xy_offsets[1] = xoff, yoff
             block = block.next()

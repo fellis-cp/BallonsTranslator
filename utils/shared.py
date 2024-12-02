@@ -86,6 +86,7 @@ ON_MACOS = sys.platform == 'darwin'
 ON_WINDOWS = sys.platform == 'win32'
 HEADLESS = False
 DEBUG = False
+args = None
 
 FUZZY_MATCH_IMAGE_NAME = False
 

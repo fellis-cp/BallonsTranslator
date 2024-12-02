@@ -9,12 +9,6 @@ class TextEffectPanel(PanelArea):
     def __init__(self, panel_name: str, config_name: str, config_expand_name: str):
         super().__init__(panel_name, config_name, config_expand_name)
 
-        # self.flayout = FlowLayout(self.scrollContent)
-        # # margin = 7
-        # # self.flayout.setVerticalSpacing(7)
-        # # self.flayout.setHorizontalSpacing(7)
-        # # self.flayout.setContentsMargins(margin, margin, margin, margin)
-
         gradient_group = PanelGroupBox(title=self.tr('Gradient'))
         gradient_group.setAutoFillBackground(True)
         glayout = QVBoxLayout(gradient_group)

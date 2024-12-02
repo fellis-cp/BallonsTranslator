@@ -6,6 +6,7 @@ import subprocess
 from functools import partial
 import time
 
+from tqdm import tqdm
 from qtpy.QtWidgets import QAction, QFileDialog, QMenu, QHBoxLayout, QVBoxLayout, QApplication, QStackedWidget, QSplitter, QListWidget, QShortcut, QListWidgetItem, QMessageBox, QTextEdit, QPlainTextEdit
 from qtpy.QtCore import Qt, QPoint, QSize, QEvent, Signal
 from qtpy.QtGui import QContextMenuEvent, QTextCursor, QGuiApplication, QIcon, QCloseEvent, QKeySequence, QKeyEvent, QPainter, QClipboard
@@ -915,6 +916,10 @@ class MainWindow(mainwindow_cls):
         self.postprocess_mt_toggle = True
         if pcfg.module.empty_runcache and not shared.HEADLESS:
             self.module_manager.unload_all_models()
+        if shared.args.export_translation_txt:
+            self.on_export_txt('translation')
+        if shared.args.export_source_txt:
+            self.on_export_txt('source')
         if shared.HEADLESS:
             self.run_next_dir()
 
@@ -1182,9 +1187,7 @@ class MainWindow(mainwindow_cls):
     def on_export_txt(self, dump_target, suffix='.txt'):
         try:
             self.imgtrans_proj.dump_txt(dump_target=dump_target, suffix=suffix)
-            msg = QMessageBox()
-            msg.setText(self.tr('Text file exported to ') + self.imgtrans_proj.dump_txt_path(dump_target, suffix))
-            msg.exec_()
+            create_info_dialog(self.tr('Text file exported to ') + self.imgtrans_proj.dump_txt_path(dump_target, suffix))
         except Exception as e:
             create_error_dialog(e, self.tr('Failed to export as TEXT file'))
 
@@ -1346,7 +1349,6 @@ class MainWindow(mainwindow_cls):
             self.app.quit()
             return
         d = self.exec_dirs.pop(0)
-        from tqdm import tqdm
         
         LOGGER.info(f'translating {d} ...')
         self.openDir(d)
