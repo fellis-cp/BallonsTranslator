@@ -2,6 +2,8 @@ import re
 import numpy as np
 import time
 import cv2
+import random
+import string
 from typing import List
 
 import httpx
@@ -19,13 +21,14 @@ class LensCore:
         'image/x-icon', 'image/bmp', 'image/jpeg',
         'image/png', 'image/tiff', 'image/webp', 'image/heic'
     ]
+    # https://github.com/AuroraWright/owocr/blob/master/owocr/ocr.py
     HEADERS = {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Encoding': 'gzip, deflate, br',
         'Accept-Language': 'en-US,en;q=0.9',
         'Origin': 'https://lens.google.com',
         'Referer': 'https://lens.google.com/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/6.0 TV Safari/538.1 STvPlus/9e6462f14a056031e5b32ece2af7c3ca,gzip(gfe),gzip(gfe)'
     }
 
     def __init__(self, proxy=None):
@@ -36,6 +39,8 @@ class LensCore:
         try:
             client = httpx.Client(proxies=self.proxy) if self.proxy else httpx.Client()
             response = client.post(url, headers=headers, files=files)
+            if response.status_code == 303:
+                raise Exception("Error 303: See Other. Potential misconfiguration in headers or file upload.")
             if response.status_code != 200:
                 raise Exception(f"Failed to upload image. Status code: {response.status_code}")
             return response
@@ -44,8 +49,9 @@ class LensCore:
 
     def scan_by_data(self, data, mime, dimensions):
         headers = self.HEADERS.copy()
+        random_filename = ''.join(random.choices(string.ascii_letters, k=8)) + '.jpg'
         files = {
-            'encoded_image': ('image.jpg', data, mime),
+            'encoded_image': (random_filename, data, mime),
             'original_width': (None, str(dimensions[0])),
             'original_height': (None, str(dimensions[1])),
             'processed_image_dimensions': (None, f"{dimensions[0]},{dimensions[1]}")
