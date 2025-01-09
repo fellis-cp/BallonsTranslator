@@ -648,20 +648,36 @@ def try_merge_textline(blk: TextBlock, blk2: TextBlock, fntsize_tol=1.7, distanc
     vec_prod = blk.vec @ blk2.vec
     vec_sum = blk.vec + blk2.vec
     cos_vec = vec_prod / blk.norm / blk2.norm
-    distance = blk2.distance[-1] - blk.distance[-1]
-    distance_p1 = np.linalg.norm(np.array(blk2.lines[-1][0]) - np.array(blk.lines[-1][0]))
+    # distance = blk2.distance[-1] - blk.distance[-1]
+    # distance_p1 = np.linalg.norm(np.array(blk2.lines[-1][0]) - np.array(blk.lines[-1][0]))
+    minrect1 = blk.min_rect()[0]
+    xyxy1 = [*minrect1[0], *minrect1[2]]
+    minrect2 = blk2.min_rect()[0]
+    xyxy2 = [*minrect2[0], *minrect2[2]]
+    distance_x = max(xyxy1[0], xyxy2[0]) - min(xyxy1[2], xyxy2[2])
+    distance_y = max(xyxy1[1], xyxy2[1]) - min(xyxy1[3], xyxy2[3])
+
     l1, l2 = Polygon(blk.lines[-1]), Polygon(blk2.lines[-1])
     if not l1.intersects(l2):
+        if blk.vertical:
+            if distance_y > 0:
+                return False
+        else:
+            if distance_x > 0:
+                return False
         if fntsize_div > fntsize_tol or 1 / fntsize_div > fntsize_tol:
             return False
         if abs(cos_vec) < 0.866:   # cos30
             return False
-        if distance > distance_tol * fntsz_avg:
+        # if distance > distance_tol * fntsz_avg:
+        #     return False
+        if blk.vertical and blk2.vertical and distance_x > fntsz_avg * 1.5:
             return False
-        if blk.vertical and blk2.vertical and distance_p1 > fntsz_avg * 2.5:
+        if not blk.vertical and distance_y > fntsz_avg * 0.3:
             return False
     # merge
-    blk.lines.append(blk2.lines[0])
+    for line in blk2.lines:
+        blk.lines.append(line)
     blk.vec = vec_sum
     blk.angle = int(round(np.rad2deg(math.atan2(vec_sum[1], vec_sum[0]))))
     if blk.vertical:
@@ -741,6 +757,7 @@ def group_output(blks, lines, im_w, im_h, mask=None, sort_blklist=True) -> List[
                 bbox_idx = jj
         if bbox_score > bbox_score_thresh:
             blk_list[bbox_idx].lines.append(line)
+            blk_list[bbox_idx].adjust_bbox(with_bbox=True)
         else:   # if no textblock was assigned, check whether there is "enough" textmask
             if mask is not None:
                 mask_score = mask[by1: by2, bx1: bx2].mean() / 255
@@ -765,6 +782,8 @@ def group_output(blks, lines, im_w, im_h, mask=None, sort_blklist=True) -> List[
                     continue
             xywh = np.array([[bx1, by1, bx2-bx1, by2-by1]])
             blk.lines = xywh2xyxypoly(xywh).reshape(-1, 4, 2).tolist()
+        else:
+            blk.adjust_bbox(with_bbox=False)
         examine_textblk(blk, im_w, im_h, sort=True)
         
         # split manga text if there is a distance gap
@@ -784,6 +803,13 @@ def group_output(blks, lines, im_w, im_h, mask=None, sort_blklist=True) -> List[
                 blk.adjust_bbox(with_bbox=True)
         final_blk_list += sub_blk_list
 
+    _final_blk_list = []
+    for blk in final_blk_list:
+        if blk.vertical:
+            scattered_lines['ver'].append(blk)
+        else:
+            _final_blk_list.append(blk)
+    final_blk_list = _final_blk_list
     # step3: merge scattered lines, sort textblocks by "grid"
     final_blk_list += merge_textlines(scattered_lines['hor'])
     final_blk_list += merge_textlines(scattered_lines['ver'])

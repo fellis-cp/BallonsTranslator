@@ -33,7 +33,7 @@ class MITModels(OCRBase):
         return self.model(blk_list, regions, textblk_lst_indices, chunk_size=self.chunk_size)
 
     def updateParam(self, param_key: str, param_content):
-        if param_key == 'device' and self.device != param_content:
+        if param_key == 'device' and self.device != param_content and self.model is not None:
             self.model.to(param_content)
         super().updateParam(param_key, param_content)
 

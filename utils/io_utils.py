@@ -13,9 +13,14 @@ import numpy as np
 from natsort import natsorted
 
 IMG_EXT = ['.bmp', '.jpg', '.png', '.jpeg', '.webp']
-NP_BOOL_TYPES = (np.bool_, np.bool8)
-NP_FLOAT_TYPES = (np.float_, np.float16, np.float32, np.float64)
+
 NP_INT_TYPES = (np.int_, np.int8, np.int16, np.int32, np.int64, np.uint, np.uint8, np.uint16, np.uint32, np.uint64)
+if int(np.version.full_version.split('.')[0]) == 1:
+    NP_BOOL_TYPES = (np.bool_, np.bool8)
+    NP_FLOAT_TYPES = (np.float_, np.float16, np.float32, np.float64)
+else:
+    NP_BOOL_TYPES = (np.bool_, np.bool)
+    NP_FLOAT_TYPES = (np.float16, np.float32, np.float64)
 
 def to_dict(obj):
     return json.loads(json.dumps(obj, default=lambda o: o.__dict__, ensure_ascii=False))

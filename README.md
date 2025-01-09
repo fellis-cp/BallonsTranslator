@@ -24,7 +24,7 @@
   
 * 文本编辑  
   - 支持所见即所得地富文本编辑和一些基础排版格式调整、[字体样式预设](https://github.com/dmMaze/BallonsTranslator/pull/311)
-  - 支持全文/源文/译文查找替换
+  - 支持全文/原文/译文查找替换
   - 支持导入导出 word 文档
 
 * 适用于条漫
@@ -171,7 +171,7 @@ Sugoi 翻译器作者: [mingshiba](https://www.patreon.com/mingshiba)
   
 ### 文本检测
  * 暂时仅支持日文(方块字都差不多)和英文检测，训练代码和说明见https://github.com/dmMaze/comic-text-detector
- * 支持使用 [星河云（团子漫画OCR）](https://cloud.stariver.org.cn/)的字体检测，需要填写用户名和密码，每次启动时会自动登录。
+ * 支持使用 [星河云（团子漫画OCR）](https://cloud.stariver.org.cn/)的文本检测，需要填写用户名和密码，每次启动时会自动登录。
    * 详细说明见 [团子OCR说明](doc/团子OCR说明.md)
 
 

@@ -255,6 +255,16 @@ class FontFamilyComboBox(QFontComboBox):
             self.param_changed.emit('font_family', ffamily)
             self._current_font = ffamily
 
+
+    def update_font_list(self, font_list):
+        self.currentFontChanged.disconnect(self.on_fontfamily_changed)
+        current_font = self.currentFont().family()
+        self.clear()
+        self.addItems(font_list)
+        self.addItems([current_font])
+        self.setCurrentText(current_font)
+        self.currentFontChanged.connect(self.on_fontfamily_changed)
+
     def on_return_pressed(self):
         self.return_pressed = True
         self.apply_fontfamily()

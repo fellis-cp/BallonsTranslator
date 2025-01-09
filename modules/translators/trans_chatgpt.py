@@ -5,12 +5,15 @@ import time
 from typing import List, Dict, Union
 import yaml
 import traceback
+import inspect
 
 import openai
 
 from .base import BaseTranslator, register_translator
 
+
 OPENAPI_V1_API = int(openai.__version__.split('.')[0]) >= 1
+
 
 class InvalidNumTranslations(Exception):
     pass
@@ -310,17 +313,28 @@ class GPTTranslator(BaseTranslator):
             messages.insert(1, {'role': 'user', 'content': chat_sample[0]})
             messages.insert(2, {'role': 'assistant', 'content': chat_sample[1]})
 
+        func_args = {
+            'model': model,
+            'messages': messages,
+            'temperature': self.temperature,
+            'top_p': self.top_p,
+        }
+        max_tokens = self.max_tokens // 2 # Assuming that half of the tokens are used for the query
+        func_parameters = inspect.signature(openai.chat.completions.create).parameters
+        if 'max_completion_tokens' in func_parameters:
+            func_args['max_completion_tokens'] = max_tokens
+        else:
+            func_args['max_tokens'] = max_tokens
+        if 'presence_penalty' in func_parameters:
+            func_args['presence_penalty'] = self.params['presence penalty']
+            func_args['frequency_penalty'] = self.params['frequency penalty']
+
         if OPENAPI_V1_API:
             openai_chatcompletions_create = openai.chat.completions.create
         else:
             openai_chatcompletions_create = openai.ChatCompletion.create
-        response = openai_chatcompletions_create(
-            model=model,
-            messages=messages,
-            max_tokens=self.max_tokens // 2,
-            temperature=self.temperature,
-            top_p=self.top_p,
-        )
+
+        response = openai_chatcompletions_create(**func_args)
 
         if OPENAPI_V1_API:
             if response.usage is not None:

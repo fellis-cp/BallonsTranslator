@@ -63,7 +63,8 @@ class MangaOCR(OCRBase):
         self.model: MangaOCR = None
 
     def _load_model(self):
-        self.model = MangaOcr(device=self.device)
+        if self.model is None:
+            self.model = MangaOcr(device=self.device)
 
     def ocr_img(self, img: np.ndarray) -> str:
         return self.model(img)
@@ -82,7 +83,7 @@ class MangaOCR(OCRBase):
     def updateParam(self, param_key: str, param_content):
         super().updateParam(param_key, param_content)
         device = self.params['device']['value']
-        if self.device != device:
+        if self.device != device and self.model is not None:
             self.model.to(device)
 
 

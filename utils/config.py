@@ -82,6 +82,7 @@ class ProgramConfig(Config):
     let_family_flag: int = 0
     let_autolayout_flag: bool = True
     let_uppercase_flag: bool = True
+    let_show_only_custom_fonts_flag: bool = False
     let_textstyle_indep_flag: bool = False
     text_styles_path: str = osp.join(shared.DEFAULT_TEXTSTYLE_DIR, 'default.json')
     fsearch_case: bool = False

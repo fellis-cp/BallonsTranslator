@@ -297,6 +297,9 @@ class MainWindow(mainwindow_cls):
         self.configPanel.setupConfig()
         self.configPanel.save_config.connect(self.save_config)
         self.configPanel.reload_textstyle.connect(self.load_textstyle_from_proj_dir)
+        self.configPanel.show_only_custom_font.connect(self.on_show_only_custom_font)
+        if pcfg.let_show_only_custom_fonts_flag:
+            self.on_show_only_custom_font(True)
 
         textblock_mode = pcfg.imgtrans_textblock
         if pcfg.imgtrans_textedit:
@@ -367,6 +370,13 @@ class MainWindow(mainwindow_cls):
         else:
             pcfg.text_styles_path = text_style_path
             save_text_styles()
+
+    def on_show_only_custom_font(self, only_custom: bool):
+        if only_custom:
+            font_list = shared.CUSTOM_FONTS
+        else:
+            font_list = shared.FONT_FAMILIES
+        self.textPanel.formatpanel.familybox.update_font_list(font_list)
 
     def openDir(self, directory: str):
         try:

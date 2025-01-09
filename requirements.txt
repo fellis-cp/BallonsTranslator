@@ -37,7 +37,7 @@ requests
 Pillow>=10.0.1
 beautifulsoup4
 colorama
-openai
+openai>=1.59.5
 pyyaml
 natsort
 py7zr

@@ -3,7 +3,7 @@ import time
 from typing import List, Dict, Union
 import xml.etree.ElementTree as ET
 import traceback
-import logging
+import inspect
 
 import openai
 
@@ -252,19 +252,28 @@ Then stop, without any other explanations or notes.
             {'role': 'user', 'content': prompt},
         ]
 
+        func_args = {
+            'model': model,
+            'messages': messages,
+            'temperature': self.temperature,
+            'top_p': self.top_p,
+        }
+        max_tokens = self.max_tokens // 2 # Assuming that half of the tokens are used for the query
+        func_parameters = inspect.signature(openai.chat.completions.create).parameters
+        if 'max_completion_tokens' in func_parameters:
+            func_args['max_completion_tokens'] = max_tokens
+        else:
+            func_args['max_tokens'] = max_tokens
+        if 'presence_penalty' in func_parameters:
+            func_args['presence_penalty'] = self.params['presence penalty']
+            func_args['frequency_penalty'] = self.params['frequency penalty']
+
         if OPENAPI_V1_API:
             openai_chatcompletions_create = openai.chat.completions.create
         else:
             openai_chatcompletions_create = openai.ChatCompletion.create
-        response = openai_chatcompletions_create(
-            model=model,
-            messages=messages,
-            max_tokens=self.max_tokens // 2,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            frequency_penalty=self.params['frequency penalty'],
-            presence_penalty=self.params['presence penalty']
-        )
+
+        response = openai_chatcompletions_create(**func_args)
 
         self.logger.debug(f'openai response: \n {response}')
 
