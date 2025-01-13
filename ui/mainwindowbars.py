@@ -337,6 +337,8 @@ class TitleBar(Widget):
         self.global_search_trigger = globalSearchAction.triggered
         globalSearchAction.setShortcut(QKeySequence('Ctrl+G'))
 
+        replacePreMTkeyword = QAction(self.tr("Keyword substitution for machine translation source text"), self)
+        self.replacePreMTkeyword_trigger = replacePreMTkeyword.triggered
         replaceMTkeyword = QAction(self.tr("Keyword substitution for machine translation"), self)
         self.replaceMTkeyword_trigger = replaceMTkeyword.triggered
         replaceOCRkeyword = QAction(self.tr("Keyword substitution for source text"), self)
@@ -345,7 +347,7 @@ class TitleBar(Widget):
         editMenu = QMenu(self.editToolBtn)
         editMenu.addActions([undoAction, redoAction])
         editMenu.addSeparator()
-        editMenu.addActions([pageSearchAction, globalSearchAction, replaceOCRkeyword, replaceMTkeyword])
+        editMenu.addActions([pageSearchAction, globalSearchAction, replaceOCRkeyword, replacePreMTkeyword, replaceMTkeyword])
         self.editToolBtn.setMenu(editMenu)
         self.editToolBtn.setPopupMode(QToolButton.InstantPopup)
 

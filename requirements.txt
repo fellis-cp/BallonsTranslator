@@ -5,7 +5,7 @@ PyQt6>=6.6.1,<6.7.0 ; python_version > "3.8"
 PyQt5-Qt5>=5.15.2 ; python_version <= "3.8"
 PyQt5>=5.15.10 ; python_version <= "3.8"
 numpy<2
-urllib3==1.25.11; sys_platform == 'win32' # https://github.com/psf/requests/issues/5740
+urllib3; sys_platform == 'win32' # https://github.com/psf/requests/issues/5740
 urllib3; sys_platform == 'darwin' # fix urllib3.package.six.move module not found error
 jaconv
 torch
@@ -54,3 +54,4 @@ pyobjc-framework-cocoa; sys_platform == 'darwin'
 pyobjc-framework-coreml; sys_platform == 'darwin'
 pyobjc-framework-quartz; sys_platform == 'darwin'
 pyobjc-framework-vision; sys_platform == 'darwin'
+msl-loadlib

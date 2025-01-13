@@ -9,7 +9,7 @@ from utils.logger import logger as LOGGER
 from utils import shared
 
 
-GPUINTENSIVE_SET = {'cuda', 'mps'}
+GPUINTENSIVE_SET = {'cuda', 'xpu', 'mps'}
 
 def register_hooks(hooks_registered: OrderedDict, callbacks: Union[List, Callable, Dict]):
     if callbacks is None:
@@ -162,14 +162,22 @@ import torch
 
 DEFAULT_DEVICE = 'cpu'
 if hasattr(torch, 'cuda') and torch.cuda.is_available():
-    DEFAULT_DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    DEFAULT_DEVICE = 'cuda'
+elif hasattr(torch, 'xpu')  and torch.xpu.is_available():
+    DEFAULT_DEVICE = 'xpu' if torch.xpu.is_available() else 'cpu'
 elif hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
     DEFAULT_DEVICE = 'mps'
-BF16_SUPPORTED = DEFAULT_DEVICE == 'cuda' and torch.cuda.is_bf16_supported()
+BF16_SUPPORTED = DEFAULT_DEVICE == 'cuda' and torch.cuda.is_bf16_supported() or DEFAULT_DEVICE == 'xpu' and torch.xpu.is_bf16_supported()
 
 def is_nvidia():
     if DEFAULT_DEVICE == 'cuda':
         if torch.version.cuda:
+            return True
+    return False
+
+def is_intel():
+    if DEFAULT_DEVICE == 'xpu':
+        if torch.version.xpu:
             return True
     return False
 
@@ -178,6 +186,9 @@ def soft_empty_cache():
     if DEFAULT_DEVICE == 'cuda':
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
+    elif DEFAULT_DEVICE == 'xpu':
+       torch.xpu.empty_cache()
+       # torch.xpu.ipc_collect()
     elif DEFAULT_DEVICE == 'mps':
         torch.mps.empty_cache()
 
@@ -187,6 +198,7 @@ DEVICE_SELECTOR = lambda : deepcopy(
         'options': [
             'cpu',
             'cuda',
+            'xpu',
             'mps'
         ],
         'value': DEFAULT_DEVICE

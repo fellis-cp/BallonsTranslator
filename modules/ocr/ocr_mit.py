@@ -20,6 +20,10 @@ class MITModels(OCRBase):
     _line_only = True
     _load_model_keys = {'model'}
 
+    def __init__(self, **params) -> None:
+        super().__init__(**params)
+        self.model = None
+
     @property
     def chunk_size(self) -> int:
         return self.params['chunk_size']['value']

@@ -9,6 +9,17 @@ import subprocess
 import importlib.util
 import pkg_resources
 from platform import platform
+from pathlib import Path
+import sys
+import argparse
+import os.path as osp
+import os
+import importlib
+import re
+import subprocess
+import importlib.util
+import pkg_resources
+from platform import platform
 
 BRANCH = 'dev'
 VERSION = '1.4.0'
@@ -45,6 +56,7 @@ parser.add_argument("--exec_dirs", default='', help='translation queue (project 
 parser.add_argument("--ldpi", default=None, type=float, help='logical dots perinch')
 parser.add_argument("--export-translation-txt", action='store_true', help='save translation to txt file once RUN completed')
 parser.add_argument("--export-source-txt", action='store_true', help='save source to txt file once RUN completed')
+parser.add_argument("--frozen", action='store_true', help='run without checking requirements')
 args, _ = parser.parse_known_args()
 
 
@@ -283,6 +295,9 @@ def main():
 def prepare_environment():
     if getattr(sys, 'frozen', False):
         print('Running as app, skip dependency installation')
+        return
+    
+    if args.frozen:
         return
 
     req_updated = False

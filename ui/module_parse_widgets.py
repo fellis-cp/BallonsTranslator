@@ -312,6 +312,7 @@ class ModuleConfigParseWidget(QWidget):
 
 class TranslatorConfigPanel(ModuleConfigParseWidget):
 
+    show_pre_MT_keyword_window = Signal()
     show_MT_keyword_window = Signal()
     show_OCR_keyword_window = Signal()
 
@@ -321,6 +322,9 @@ class TranslatorConfigPanel(ModuleConfigParseWidget):
     
         self.source_combobox = ConfigComboBox(scrollWidget=scrollWidget)
         self.target_combobox = ConfigComboBox(scrollWidget=scrollWidget)
+        self.replacePreMTkeywordBtn = NoBorderPushBtn(self.tr("Keyword substitution for machine translation source text"), self)
+        self.replacePreMTkeywordBtn.clicked.connect(self.show_pre_MT_keyword_window)
+        self.replacePreMTkeywordBtn.setFixedWidth(500)
         self.replaceMTkeywordBtn = NoBorderPushBtn(self.tr("Keyword substitution for machine translation"), self)
         self.replaceMTkeywordBtn.clicked.connect(self.show_MT_keyword_window)
         self.replaceMTkeywordBtn.setFixedWidth(500)
@@ -338,6 +342,7 @@ class TranslatorConfigPanel(ModuleConfigParseWidget):
         
         self.vlayout.insertLayout(1, st_layout) 
         self.vlayout.addWidget(self.replaceOCRkeywordBtn)
+        self.vlayout.addWidget(self.replacePreMTkeywordBtn)
         self.vlayout.addWidget(self.replaceMTkeywordBtn)
 
     def finishSetTranslator(self, translator: BaseTranslator):

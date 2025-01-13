@@ -608,7 +608,7 @@ class ModuleManager(QObject):
         self.check_inpaint_fin_timer = QTimer(self)
         self.check_inpaint_fin_timer.timeout.connect(self.check_inpaint_th_finished)
 
-    def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_postprocess: Callable = None):
+    def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_preprocess: Callable = None, translate_postprocess: Callable = None):
         self.textdetect_thread = TextDetectThread()
         self.textdetect_thread.finish_set_module.connect(self.on_finish_setdetector)
 
@@ -642,6 +642,7 @@ class ModuleManager(QObject):
         translator_panel.target_combobox.currentTextChanged.connect(self.on_translatortarget_changed)
         translator_panel.paramwidget_edited.connect(self.on_translatorparam_edited)
         from modules.translators.hooks import chs2cht
+        BaseTranslator.register_preprocess_hooks({'keyword_sub': translate_preprocess})
         BaseTranslator.register_postprocess_hooks({'chs2cht': chs2cht, 'keyword_sub': translate_postprocess})
 
         self.inpaint_panel = inpainter_panel = config_panel.inpaint_config_panel

@@ -157,7 +157,7 @@ class Canvas(QGraphicsScene):
     finish_painting = Signal(StrokeImgItem)
     finish_erasing = Signal(StrokeImgItem)
     delete_textblks = Signal(int)
-    copy_textblks = Signal(QPointF)
+    copy_textblks = Signal()
     paste_textblks = Signal(QPointF)
     copy_src_signal = Signal()
     paste_src_signal = Signal()
@@ -786,9 +786,9 @@ class Canvas(QGraphicsScene):
             elif rst == delete_recover_act:
                 self.delete_textblks.emit(1)
             elif rst == copy_act:
-                self.on_copy(pos.toPointF())
+                self.on_copy()
             elif rst == paste_act:
-                self.on_paste(pos.toPointF())
+                self.on_paste()
             elif rst == copy_src_act:
                 self.copy_src_signal.emit()
             elif rst == paste_src_act:
@@ -825,12 +825,10 @@ class Canvas(QGraphicsScene):
             else:
                 self.paste_textblks.emit(p)
 
-    def on_copy(self, p: QPointF = None):
+    def on_copy(self):
         if self.textEditMode():
             if self.have_selected_blkitem:
-                if p is None:
-                    p = self.scene_cursor_pos()
-                self.copy_textblks.emit(p)
+                self.copy_textblks.emit()
 
     def hide_rubber_band(self):
         if self.rubber_band.isVisible():

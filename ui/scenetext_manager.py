@@ -637,7 +637,7 @@ class SceneTextManager(QObject):
         if len(selected_blks) > 0:
             self.canvas.push_undo_command(DeleteBlkItemsCommand(selected_blks, mode, self))
 
-    def onCopyBlkItems(self, pos: QPointF):
+    def onCopyBlkItems(self):
         selected_blks = self.canvas.selected_text_items()
         if len(selected_blks) == 0 and self.txtblkShapeControl.blk_item is not None:
             selected_blks.append(self.txtblkShapeControl.blk_item)
@@ -649,13 +649,9 @@ class SceneTextManager(QObject):
         if self.canvas.text_change_unsaved():
             self.updateTextBlkList()
 
-        if pos is None:
-            pos = selected_blks[0].blk.xyxy
-            pos_x, pos_y = pos[0], pos[1]
-        else:
-            pos_x, pos_y = pos.x(), pos.y()
-            pos_x = int(pos_x / self.canvas.scale_factor)
-            pos_y = int(pos_y / self.canvas.scale_factor)
+        pos = selected_blks[0].blk.bounding_rect()
+        pos_x = int(pos[0] + pos[2] / 2)
+        pos_y = int(pos[1] + pos[3] / 2)
 
         textlist = []
         for blkitem in selected_blks:

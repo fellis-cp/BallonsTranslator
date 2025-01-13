@@ -1,4 +1,4 @@
-[简体中文](../doc/saladict_chs.md) | [English](../doc/saladict.md) | pt-BR
+[简体中文](../doc/saladict_chs.md) | [English](../doc/saladict.md) | pt-BR  | [한국어](../doc/saladict_ko.md)
 
 ---
 

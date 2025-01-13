@@ -45,6 +45,7 @@ def propagate_user_edit(src_edit: Union[TransTextEdit, TextBlkItem], target_edit
             cursor.setPosition(pos)
             cursor.setPosition(pos + removed, QTextCursor.MoveMode.KeepAnchor)
             cursor.removeSelectedText()
+    target_edit.old_undo_steps = target_edit.document().availableUndoSteps()
 
 
 class MoveBlkItemsCommand(QUndoCommand):
@@ -265,12 +266,7 @@ class TextItemEditCommand(QUndoCommand):
         self.op_counter = 0
         self.edit = trans_edit
         self.blkitem = blkitem
-        self.num_steps = min(num_steps, 2)
-        if blkitem.input_method_from == -1:
-            if not blkitem.is_formatting:
-                self.num_steps = 1
-        else:
-            blkitem.input_method_from = -1
+        self.num_steps = num_steps
         self.is_formatting = blkitem.is_formatting
 
     def redo(self):
@@ -292,14 +288,11 @@ class TextItemEditCommand(QUndoCommand):
 class TextEditCommand(QUndoCommand):
     def __init__(self, edit: Union[SourceTextEdit, TransTextEdit], num_steps: int, blkitem: TextBlkItem) -> None:
         super().__init__()
+        # TODO: remove it for transtextedit
         self.edit = edit
         self.blkitem = blkitem
         self.op_counter = 0
-        self.num_steps = min(num_steps, 2)
-        if edit.input_method_from == -1:
-            self.num_steps = 1
-        else:
-            edit.input_method_from = -1
+        self.num_steps = num_steps
 
     def redo(self):
         if self.op_counter == 0:
