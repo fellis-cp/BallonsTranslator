@@ -291,8 +291,8 @@ class LamaInpainterMPE(InpainterBase):
                 2048
             ], 
             'value': 2048
-        }, 
-        'device': DEVICE_SELECTOR()
+        },
+        'device': DEVICE_SELECTOR(not_supported=['privateuseone'])
     }
 
     download_file_list = [{
@@ -414,8 +414,8 @@ class LamaLarge(LamaInpainterMPE):
                 2048
             ], 
             'value': 1536,
-        }, 
-        'device': DEVICE_SELECTOR(),
+        },
+        'device': DEVICE_SELECTOR(not_supported=['privateuseone']),
         'precision': {
             'type': 'selector',
             'options': [

@@ -11,7 +11,7 @@ mit_params = {
         'options': [8, 16, 24, 32],
         'value': 16
     },
-    'device': DEVICE_SELECTOR(),
+    'device': DEVICE_SELECTOR(not_supported=['privateuseone']),
     'description': 'OCRMIT32px'
 }
 

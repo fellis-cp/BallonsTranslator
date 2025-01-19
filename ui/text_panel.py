@@ -148,8 +148,8 @@ class FontSizeBox(QFrame):
         self.fcombobox = SizeComboBox([1, 1000], 'font_size', self)
         self.fcombobox.addItems([
             "5", "5.5", "6.5", "7.5", "8", "9", "10", "10.5",
-            "11", "12", "14", "16", "18", "20", '22', "26", "28", 
-            "36", "48", "56", "72"
+            "11", "12", "14", "16", "18", "20", '22', "26", "28",
+            "36", "48", "56", "72", "93", "123", "163"
         ])
         self.fcombobox.param_changed.connect(self.param_changed)
 
@@ -164,35 +164,55 @@ class FontSizeBox(QFrame):
         hlayout.setSpacing(3)
         hlayout.setContentsMargins(0, 0, 0, 0)
 
-    def getFontSize(self) -> float:
-        return self.fcombobox.value()
+    def getFontSize(self) -> str:
+        return self.fcombobox.currentText()
 
     def onUpBtnClicked(self):
+        raito = 1.25
         size = self.getFontSize()
-        newsize = int(round(size * 1.25))
+        multi_size=False
+        if "+" in size:
+            size = size.strip("+")
+            multi_size=True
+        size = float(size)
+        newsize = int(round(size * raito))
         if newsize == size:
             newsize += 1
         newsize = min(1000, newsize)
         if newsize != size:
-            self.param_changed.emit('font_size', newsize)
-            self.fcombobox.setCurrentText(str(newsize))
-        
+            if not multi_size:
+                self.param_changed.emit('font_size', newsize)
+                self.fcombobox.setCurrentText(str(newsize))
+            else:
+                self.param_changed.emit('rel_font_size', raito)
+                self.fcombobox.setCurrentText(str(newsize)+"+")
+
     def onDownBtnClicked(self):
+        raito = 0.75
         size = self.getFontSize()
-        newsize = int(round(size * 0.75))
+        multi_size=False
+        if "+" in size:
+            size = size.strip("+")
+            multi_size=True
+        size = float(size)
+        newsize = int(round(size * raito))
         if newsize == size:
             newsize -= 1
         newsize = max(1, newsize)
         if newsize != size:
-            self.param_changed.emit('font_size', newsize)
-            self.fcombobox.setCurrentText(str(newsize))
+            if not multi_size:
+                self.param_changed.emit('font_size', newsize)
+                self.fcombobox.setCurrentText(str(newsize))
+            else:
+                self.param_changed.emit('rel_font_size', raito)
+                self.fcombobox.setCurrentText(str(newsize)+"+")
 
 
 class SizeControlLabel(QLabel):
-    
+
     btn_released = Signal()
     size_ctrl_changed = Signal(int)
-    
+
     def __init__(self, parent=None, direction=0, text=''):
         super().__init__(parent)
         if text:
@@ -459,7 +479,7 @@ class FontFormatPanel(Widget):
         return self.textstyle_panel.active_text_style_label
 
     def on_param_changed(self, param_name: str, value):
-        func = FM.handle_ffmt_change.get(param_name)
+        func = FM.handle_ffmt_change.get(param_name if not param_name == "rel_font_size" else "font_size")
         func_kwargs = {}
         if param_name == 'font_size':
             func_kwargs['clip_size'] = True
@@ -506,8 +526,8 @@ class FontFormatPanel(Widget):
         else:
             mul = 0.01
         self.lineSpacingBox.setValue(self.lineSpacingBox.value() + delta * mul)
-            
-    def set_active_format(self, font_format: FontFormat):
+
+    def set_active_format(self, font_format: FontFormat, multi_size=False):
         C.active_format = font_format
         self.familybox.blockSignals(True)
         font_size = round(font_format.font_size, 1)
@@ -515,6 +535,8 @@ class FontFormatPanel(Widget):
             font_size = str(int(font_size))
         else:
             font_size = f'{font_size:.1f}'
+        if multi_size:
+            font_size += "+"
         self.fontsizebox.fcombobox.setCurrentText(font_size)
         self.familybox.setCurrentText(font_format.font_family)
         self.colorPicker.setPickerColor(font_format.foreground_color())
@@ -555,7 +577,7 @@ class FontFormatPanel(Widget):
         if self.global_mode():
             self.set_globalfmt_title()
 
-    def set_textblk_item(self, textblk_item: TextBlkItem = None):
+    def set_textblk_item(self, textblk_item: TextBlkItem = None, multi_select:bool=False):
         if textblk_item is None:
             focus_w = self.app.focusWidget()
             focus_p = None if focus_w is None else focus_w.parentWidget()
@@ -567,13 +589,18 @@ class FontFormatPanel(Widget):
                     focus_on_fmtoptions = True
             if not focus_on_fmtoptions:
                 self.textblk_item = None
-                self.set_active_format(self.global_format)
-                self.set_globalfmt_title()
+                self.set_active_format(self.global_format, multi_select)
+                if multi_select:
+                    self.textstyle_panel.setTitle('Group')
+                else:
+                    self.set_globalfmt_title()
+            
         else:
             if not self.restoring_textblk:
                 blk_fmt = textblk_item.get_fontformat()
                 self.textblk_item = textblk_item
-                self.set_active_format(blk_fmt)
+                multi_size = not textblk_item.isEditing() and textblk_item.isMultiFontSize()
+                self.set_active_format(blk_fmt, multi_size)
                 self.textstyle_panel.setTitle(f'TextBlock #{textblk_item.idx}')
 
     def on_effectbtn_clicked(self):

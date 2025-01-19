@@ -67,8 +67,9 @@ class ControlBlockItem(QGraphicsRectItem):
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         self.ctrl.ctrlblockPressed()
-        blk_item = self.ctrl.blk_item
         if event.button() == Qt.MouseButton.LeftButton:
+            blk_item = self.ctrl.blk_item
+            blk_item.setSelected(True)
             if self.visible_rect.contains(event.pos()):
                 self.ctrl.reshaping = True
                 self.drag_mode = self.DRAG_RESHAPE

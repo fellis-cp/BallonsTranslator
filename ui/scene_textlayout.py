@@ -269,6 +269,9 @@ class SceneTextLayout(QAbstractTextDocumentLayout):
     def documentChanged(self, position: int, charsRemoved: int, charsAdded: int) -> None:
         if not self.relayout_on_changed:
             return
+        self.reLayoutEverything()
+        
+    def reLayoutEverything(self):
         self._doc_text = self.document().toPlainText()
         self._max_font_size = -1
         block = self.document().firstBlock()

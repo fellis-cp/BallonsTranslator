@@ -125,6 +125,7 @@ class TextBlkItem(QGraphicsTextItem):
 
     def paint_stroke(self, painter: QPainter):
         doc = QTextDocument()
+        doc.setUndoRedoEnabled(False)
         doc.setDocumentMargin(self.document().documentMargin())
         doc.setDefaultFont(self.document().defaultFont())
         doc.setHtml(self.document().toHtml())
@@ -494,7 +495,43 @@ class TextBlkItem(QGraphicsTextItem):
 
     def isEditing(self) -> bool:
         return self.textInteractionFlags() == Qt.TextInteractionFlag.TextEditorInteraction
+
+    def isMultiFontSize(self) -> bool:
+        doc = self.document()
+        block = doc.firstBlock()
+        if block.isValid():
+            it = block.begin()
+            # causes frozen for pyside==6.8.1
+            firstFontSize = it.fragment().charFormat().fontPointSize()
+        else:
+            return False
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                font_size = fragment.charFormat().fontPointSize()
+                if not firstFontSize == font_size:
+                    return True
+                it += 1
+            block = block.next()
+        return False
     
+    def minFontSize(self, to_px=True):
+        doc = self.document()
+        block = doc.firstBlock()
+        min_font_size = self.textCursor().charFormat().fontPointSize()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                font_size = fragment.charFormat().fontPointSize()
+                min_font_size = min(min_font_size, font_size)
+                it += 1
+            block = block.next()
+        if to_px:
+            min_font_size = pt2px(min_font_size)
+        return min_font_size
+
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if not self.isEditing():
             self.startEdit(pos=event.pos())
@@ -556,7 +593,10 @@ class TextBlkItem(QGraphicsTextItem):
         fontformat.frgb = [color.red(), color.green(), color.blue()]
         fontformat.font_weight = font.weight()
         fontformat.font_family = font.family()
-        fontformat.font_size = pt2px(font.pointSizeF())
+        if self.isEditing():
+            fontformat.font_size = pt2px(font.pointSizeF())
+        else:
+            fontformat.font_size = self.minFontSize()
         fontformat.bold = font.bold()
         fontformat.underline = font.underline()
         fontformat.italic = font.italic()
@@ -672,7 +712,10 @@ class TextBlkItem(QGraphicsTextItem):
 
     def setFontFamily(self, value: str, repaint_background: bool = True, set_selected: bool = False, restore_cursor: bool = False):
         cursor, after_kwargs = self._before_set_ffmt(set_selected, restore_cursor)
+        self.layout.relayout_on_changed = False
         self._doc_set_font_family(value, cursor)
+        self.layout.relayout_on_changed = True
+        self.layout.reLayoutEverything()
         self._after_set_ffmt(cursor, repaint_background, restore_cursor, **after_kwargs)
 
     def _doc_set_font_family(self, value: str, cursor: QTextCursor):
@@ -801,6 +844,41 @@ class TextBlkItem(QGraphicsTextItem):
         if repaint_background:
             self.update()
 
+    def setRelFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, **kwargs):
+        self.is_formatting = True
+        self.block_change_signal = True
+        self.layout.relayout_on_changed = False
+        old_undo_steps = self.document().availableUndoSteps()
+        doc = self.document()
+        cursor = QTextCursor(doc)
+        block = doc.firstBlock()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                fragment = it.fragment()
+                old_font_size = fragment.charFormat().fontPointSize()
+                new_font_size = round(old_font_size * value,2)
+                cfmt = fragment.charFormat()
+                cfmt.setFontPointSize(new_font_size)
+                pos1 = fragment.position()
+                pos2 = pos1 + fragment.length()
+                cursor.setPosition(pos1)
+                cursor.setPosition(pos2, QTextCursor.MoveMode.KeepAnchor)
+                cursor.mergeCharFormat(cfmt)
+                it += 1
+            block = block.next()
+        self.old_undo_steps = new_undo_steps = self.document().availableUndoSteps()
+        self.layout.relayout_on_changed = True
+        self.layout.reLayoutEverything()
+        self.squeezeBoundingRect(True, repaint=False)
+        self.repaint_background()
+        new_steps = new_undo_steps - old_undo_steps
+        self.push_undo_stack.emit(new_steps, self.is_formatting)
+
+        self.is_formatting = False
+        self.block_change_signal = False        
+        
+
     def setFontSize(self, value: float, repaint_background: bool = False, set_selected: bool = False, restore_cursor: bool = False, clip_size: bool = False, **kwargs):
         '''
         value should be point size
@@ -891,6 +969,12 @@ class TextBlkItem(QGraphicsTextItem):
                 self.doc_size_changed.emit(self.idx)
             if repaint:
                 self.repaint_background()
+
+    def scene_scale_factor(self):
+        scale = 1
+        if hasattr(self.scene(), 'scale_factor'):
+            scale = self.scene().scale_factor
+        return scale
             
     def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True):
         '''
@@ -908,6 +992,7 @@ class TextBlkItem(QGraphicsTextItem):
         self._display_rect.setHeight(h)
         self.setCenterTransform()
         pos_shift = oc - self.sceneBoundingRect().center()
+        pos_shift = pos_shift / self.scene_scale_factor()
         
         align_c = align_tl = align_tr = False
         if self.fontformat.vertical:

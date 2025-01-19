@@ -423,6 +423,7 @@ class SceneTextManager(QObject):
         else:
             self.txtblkShapeControl.setBlkItem(None)
             self.textpanel.hide()
+            self.textpanel.formatpanel.set_textblk_item()
             self.canvas.textLayer.hide()
 
     def adjustSceneTextRect(self):
@@ -591,7 +592,7 @@ class SceneTextManager(QObject):
 
     def onTextBlkItemEndEdit(self, blk_id: int):
         self.canvas.editing_textblkitem = None
-        self.formatpanel.set_textblk_item(None)
+        self.textblk_item_list[blk_id].setSelected(True)
         self.txtblkShapeControl.endEditing()
 
     def editingTextItem(self) -> TextBlkItem:
@@ -681,6 +682,10 @@ class SceneTextManager(QObject):
         if len(blkitem_list) > 0:
             self.canvas.clearSelection()
             self.canvas.push_undo_command(PasteBlkItemsCommand(blkitem_list, pair_widget_list, self))
+            if len(blkitem_list) == 1:
+                self.formatpanel.set_textblk_item(blkitem_list[0])
+            else:
+                self.formatpanel.set_textblk_item(multi_select=True)
 
     def onFormatTextblks(self, fmt: FontFormat = None):
         if fmt is None:
@@ -714,6 +719,10 @@ class SceneTextManager(QObject):
         if self.canvas.textEditMode():
             textitems = self.canvas.selected_text_items()
             self.textEditList.set_selected_list([t.idx for t in textitems])
+            if len(textitems) == 1:
+                self.formatpanel.set_textblk_item(textitems[-1])
+            else:
+                self.formatpanel.set_textblk_item(multi_select=bool(textitems))
 
     def layout_textblk(self, blkitem: TextBlkItem, text: str = None, mask: np.ndarray = None, bounding_rect: List = None, region_rect: List = None):
         
@@ -996,7 +1005,7 @@ class SceneTextManager(QObject):
     def on_push_textitem_undostack(self, num_steps: int, is_formatting: bool):
         blkitem: TextBlkItem = self.sender()
         e_trans = self.pairwidget_list[blkitem.idx].e_trans if not is_formatting else None
-        self.canvas.push_undo_command(TextItemEditCommand(blkitem, e_trans, num_steps), update_pushed_step=is_formatting)
+        self.canvas.push_undo_command(TextItemEditCommand(blkitem, e_trans, num_steps, self.textpanel.formatpanel), update_pushed_step=is_formatting)
 
     def on_push_edit_stack(self, num_steps: int):
         edit: Union[TransTextEdit, SourceTextEdit] = self.sender()
@@ -1025,6 +1034,7 @@ class SceneTextManager(QObject):
             trans_widget_list.append(self.pairwidget_list[blk.idx].e_trans)
         if len(selected_blks) > 0:
             self.canvas.push_undo_command(ApplyFontformatCommand(selected_blks, trans_widget_list, fontformat))
+            self.formatpanel.set_active_format(fontformat)
 
     def on_transwidget_selection_changed(self):
         selitems = self.canvas.selected_text_items()
