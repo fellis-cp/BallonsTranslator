@@ -158,3 +158,47 @@ def ffmt_change_line_spacing_type(param_name: str, values: float, act_ffmt: Font
     restore_cursor = not is_global
     for blkitem, value in zip(blkitems, values):
         blkitem.setLineSpacingType(value, restore_cursor=restore_cursor)
+
+@font_formating()
+def handle_gradient_enabled(param_name: str, values: List[bool], act_ffmt: FontFormat, is_global: bool, blkitems: List[TextBlkItem], **kwargs):
+    set_kwargs = global_default_set_kwargs if is_global else local_default_set_kwargs
+    for blkitem, value in zip(blkitems, values):
+        blkitem.setGradientEnabled(value)
+        blkitem.update()
+
+@font_formating(push_undostack=True)
+def handle_gradient_start_color(param_name: str, values: List[List], act_ffmt: FontFormat, is_global: bool, blkitems: List[TextBlkItem], **kwargs):
+    set_kwargs = global_default_set_kwargs if is_global else local_default_set_kwargs
+    for blkitem, value in zip(blkitems, values):
+        blkitem.fontformat.gradient_start_color = value
+        blkitem.update()
+
+@font_formating(push_undostack=True)
+def handle_gradient_end_color(param_name: str, values: List[List], act_ffmt: FontFormat, is_global: bool, blkitems: List[TextBlkItem], **kwargs):
+    set_kwargs = global_default_set_kwargs if is_global else local_default_set_kwargs
+    for blkitem, value in zip(blkitems, values):
+        blkitem.fontformat.gradient_end_color = value
+        blkitem.update()
+
+@font_formating(push_undostack=True)
+def handle_gradient_angle(param_name: str, values: List[float], act_ffmt: FontFormat, is_global: bool, blkitems: List[TextBlkItem], **kwargs):
+    set_kwargs = global_default_set_kwargs if is_global else local_default_set_kwargs
+    for blkitem, value in zip(blkitems, values):
+        blkitem.fontformat.gradient_angle = value
+        blkitem.update()
+
+@font_formating(push_undostack=True)
+def handle_gradient_size(param_name: str, values: List[float], act_ffmt: FontFormat, is_global: bool, blkitems: List[TextBlkItem], **kwargs):
+    set_kwargs = global_default_set_kwargs if is_global else local_default_set_kwargs
+    for blkitem, value in zip(blkitems, values):
+        blkitem.fontformat.gradient_size = value
+        blkitem.update()
+
+# Add gradient handlers to the handle_ffmt_change dictionary
+handle_ffmt_change = {
+    'gradient_enabled': handle_gradient_enabled,
+    'gradient_start_color': handle_gradient_start_color,
+    'gradient_end_color': handle_gradient_end_color,
+    'gradient_angle': handle_gradient_angle,
+    'gradient_size': handle_gradient_size
+}

@@ -2,15 +2,15 @@ from typing import Union, Tuple, Callable
 
 import cv2
 import numpy as np
-from qtpy.QtCore import Signal, Qt, QPoint
-from qtpy.QtGui import QColor, QShowEvent, QPixmap, QImage, QPainter, QFontMetricsF
+from qtpy.QtCore import Signal, Qt, QPoint, QPointF
+from qtpy.QtGui import QColor, QShowEvent, QPixmap, QImage, QPainter, QFontMetricsF, QLinearGradient, QPainterPath
 from qtpy.QtWidgets import QHBoxLayout, QVBoxLayout, QGridLayout, QScrollArea, QGroupBox, QPushButton, QLabel, QDialog
 
 from utils import shared as C
 from .misc import pixmap2ndarray, ndarray2pixmap
 from utils.fontformat import FontFormat, pt2px
 from .custom_widget import Widget, ColorPickerLabel, PaintQSlider
-
+import math
 
 def apply_shadow_effect(img: Union[QPixmap, QImage, np.ndarray], color: QColor, strength=1.0, radius=21) -> Tuple[
     QPixmap, np.ndarray, np.ndarray]:
@@ -226,3 +226,178 @@ class TextEffectPanelDeprecated(QDialog):
         self.shadow_color_picker.setPickerColor(self.fontfmt.shadow_color)
         self.shadow_radius_slider.setValue(int(self.fontfmt.shadow_radius * 100))
         self.shadow_strength_slider.setValue(int(self.fontfmt.shadow_strength * 100))
+
+
+class GradientPreviewPanel(QDialog):
+    apply = Signal()
+    gradient_changed = Signal()
+    
+    def __init__(self, update_text_style_label: Callable, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self.setModal(True)
+        self.update_text_style_label = update_text_style_label
+        self.fontfmt: FontFormat = None
+        self.fontfmt = FontFormat()
+        self.active_fontfmt = FontFormat()
+
+        # Preview label setup
+        self.preview_label = QLabel(self)
+        self.preview_label.setContentsMargins(0, 0, 0, 0)
+        font = self.preview_label.font()
+        font.setPointSizeF(24)
+        self.preview_label.setFont(font)
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_text = self.tr("Gradient")
+        fm = QFontMetricsF(font)
+        br = fm.boundingRect(self.preview_text)
+        br_w, br_h = br.width(), br.height()
+        self.preview_pixmap = QPixmap(int(br_w + br_h * 2), int(br_h * 3))
+        self.preview_origin = QPointF(int(br_h), int(1.75 * br_h))
+
+        self.preview_label.setFixedHeight(int(br_h * 2))
+
+        # Enable gradient checkbox
+        self.gradient_enable = QGroupBox(self.tr("Enable Gradient"))
+        self.gradient_enable.setCheckable(True)
+        self.gradient_enable.toggled.connect(self.on_gradient_enabled_changed)
+
+        # Color pickers
+        start_color_layout = QHBoxLayout()
+        start_color_layout.addWidget(QLabel(self.tr("Start Color:")))
+        self.gradient_start_picker = ColorPickerLabel(self)
+        self.gradient_start_picker.colorChanged.connect(self.on_gradient_start_color_changed)
+        start_color_layout.addWidget(self.gradient_start_picker)
+
+        end_color_layout = QHBoxLayout()
+        end_color_layout.addWidget(QLabel(self.tr("End Color:")))
+        self.gradient_end_picker = ColorPickerLabel(self)
+        self.gradient_end_picker.colorChanged.connect(self.on_gradient_end_color_changed)
+        end_color_layout.addWidget(self.gradient_end_picker)
+
+        # Angle slider
+        self.angle_slider = PaintQSlider(self.tr("Angle"))
+        self.angle_slider.setRange(0, 359)
+        self.angle_slider.valueChanged.connect(self.on_gradient_angle_changed)
+
+        # Size slider
+        self.size_slider = PaintQSlider(self.tr("Size"))
+        self.size_slider.setRange(50, 200)
+        self.size_slider.valueChanged.connect(self.on_gradient_size_changed)
+
+        # Buttons
+        self.apply_btn = QPushButton(self.tr('Apply'))
+        self.apply_btn.clicked.connect(self.on_apply_clicked)
+        self.cancel_btn = QPushButton(self.tr('Cancel'))
+        self.cancel_btn.clicked.connect(self.on_cancel_clicked)
+
+        # Layout
+        gradient_layout = QVBoxLayout()
+        gradient_layout.addLayout(start_color_layout)
+        gradient_layout.addLayout(end_color_layout)
+        gradient_layout.addWidget(self.angle_slider)
+        gradient_layout.addWidget(self.size_slider)
+        self.gradient_enable.setLayout(gradient_layout)
+
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.apply_btn)
+        button_layout.addWidget(self.cancel_btn)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(self.preview_label)
+        main_layout.addWidget(self.gradient_enable)
+        main_layout.addLayout(button_layout)
+
+        self.setMaximumHeight(C.TEXTEFFECT_MAXHEIGHT)
+        self.updatePreviewPixmap()
+
+    def on_gradient_enabled_changed(self, enabled):
+        self.fontfmt.gradient_enabled = enabled
+        self.updatePreviewPixmap()
+
+    def on_gradient_start_color_changed(self, is_valid):
+        if is_valid:
+            color = self.gradient_start_picker.color
+            self.fontfmt.gradient_start_color = list(color.getRgb()[:3])  # Convert to list and take only RGB
+            self.updatePreviewPixmap()
+
+    def on_gradient_end_color_changed(self, is_valid):
+        if is_valid:
+            color = self.gradient_end_picker.color
+            self.fontfmt.gradient_end_color = list(color.getRgb()[:3])  # Convert to list and take only RGB
+            self.updatePreviewPixmap()
+
+    def on_gradient_angle_changed(self, value):
+        self.fontfmt.gradient_angle = float(value)
+        self.updatePreviewPixmap()
+
+    def on_gradient_size_changed(self, value):
+        self.fontfmt.gradient_size = value / 100
+        self.updatePreviewPixmap()
+
+    def updatePreviewPixmap(self):
+        if not self.isVisible():
+            return
+
+        self.preview_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(self.preview_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setFont(self.preview_label.font())
+
+        if self.fontfmt.gradient_enabled:
+            # Create gradient
+            gradient = QLinearGradient()
+            angle = self.fontfmt.gradient_angle
+            rad = math.radians(angle)
+            dx = math.cos(rad)
+            dy = math.sin(rad)
+            
+            rect = self.preview_pixmap.rect()
+            center = rect.center()
+            radius = max(rect.width(), rect.height()) * self.fontfmt.gradient_size
+            gradient.setStart(center.x() - dx * radius, center.y() - dy * radius)
+            gradient.setFinalStop(center.x() + dx * radius, center.y() + dy * radius)
+            
+            start_color = QColor(*self.fontfmt.gradient_start_color)
+            end_color = QColor(*self.fontfmt.gradient_end_color)
+            gradient.setColorAt(0, start_color)
+            gradient.setColorAt(1, end_color)
+            
+            painter.setBrush(gradient)
+            painter.setPen(Qt.PenStyle.NoPen)
+            
+            # Draw text with gradient
+            path = QPainterPath()
+            path.addText(self.preview_origin, self.preview_label.font(), self.preview_text)
+            painter.drawPath(path)
+        else:
+            painter.drawText(self.preview_origin, self.preview_text)
+        
+        painter.end()
+        self.preview_label.setPixmap(self.preview_pixmap)
+
+    def on_apply_clicked(self):
+        self.active_fontfmt.gradient_enabled = self.fontfmt.gradient_enabled
+        self.active_fontfmt.gradient_start_color = self.fontfmt.gradient_start_color
+        self.active_fontfmt.gradient_end_color = self.fontfmt.gradient_end_color
+        self.active_fontfmt.gradient_angle = self.fontfmt.gradient_angle
+        self.active_fontfmt.gradient_size = self.fontfmt.gradient_size
+        
+        self.gradient_changed.emit()
+        self.update_text_style_label()
+        self.apply.emit()
+        self.hide()
+
+    def on_cancel_clicked(self):
+        self.hide()
+
+    def showEvent(self, e: QShowEvent) -> None:
+        self.updatePreviewPixmap()
+        return super().showEvent(e)
+
+    def updatePanels(self):
+        self.gradient_enable.setChecked(self.fontfmt.gradient_enabled)
+        self.gradient_start_picker.setPickerColor(self.fontfmt.gradient_start_color)
+        self.gradient_end_picker.setPickerColor(self.fontfmt.gradient_end_color)
+        self.angle_slider.setValue(int(self.fontfmt.gradient_angle))
+        self.size_slider.setValue(int(self.fontfmt.gradient_size * 100))

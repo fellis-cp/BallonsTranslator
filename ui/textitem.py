@@ -4,7 +4,9 @@ from typing import List, Union, Tuple
 
 from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QStyle, QGraphicsSceneMouseEvent
 from qtpy.QtCore import Qt, QRect, QRectF, QPointF, Signal, QSizeF
-from qtpy.QtGui import QGradient, QKeyEvent, QFont, QTextCursor, QPixmap, QPainterPath, QTextDocument, QInputMethodEvent, QPainter, QPen, QColor, QTextCursor, QTextCharFormat, QTextDocument
+from qtpy.QtGui import (QGradient, QKeyEvent, QFont, QTextCursor, QPixmap, QPainterPath, QTextDocument, 
+                       QInputMethodEvent, QPainter, QPen, QColor, QTextCharFormat, QTextDocument, QLinearGradient, 
+                       QBrush, QPalette, QAbstractTextDocumentLayout)
 
 from utils.textblock import TextBlock, FontFormat, TextAlignment, LineSpacingType
 from utils.imgproc_utils import xywh2xyxypoly, rotate_polygons
@@ -242,6 +244,8 @@ class TextBlkItem(QGraphicsTextItem):
             cursor.setCharFormat(cfmt)
             cursor.setBlockCharFormat(cfmt)
             self.setTextCursor(cursor)
+        if self.fontformat.gradient_enabled:
+            self.setGradientEnabled(True)
         self.update_effect(font_fmt, repaint=False)
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
         self.repaint_background()
@@ -467,8 +471,8 @@ class TextBlkItem(QGraphicsTextItem):
             pen = QPen(TEXTRECT_SHOW_COLOR, 3 / self.get_scale(), Qt.PenStyle.SolidLine)
             painter.setPen(pen)
             painter.drawRect(self.unpadRect(br))
-        
         painter.restore()
+
         option.state = QStyle.State_None
         super().paint(painter, option, widget)
 
@@ -501,8 +505,12 @@ class TextBlkItem(QGraphicsTextItem):
         block = doc.firstBlock()
         if block.isValid():
             it = block.begin()
-            # causes frozen for pyside==6.8.1
-            firstFontSize = it.fragment().charFormat().fontPointSize()
+            if it.atEnd():
+                firstFontSize = block.charFormat().fontPointSize()
+            else:
+                # empty blocks causes frozen for pyside==6.8.1
+                # also randomly freezes pyqt==6.6.1 https://github.com/dmMaze/BallonsTranslator/issues/736
+                firstFontSize = it.fragment().charFormat().fontPointSize()
         else:
             return False
         while block.isValid():
@@ -600,6 +608,12 @@ class TextBlkItem(QGraphicsTextItem):
         fontformat.bold = font.bold()
         fontformat.underline = font.underline()
         fontformat.italic = font.italic()
+        # Preserve gradient settings
+        fontformat.gradient_enabled = self.fontformat.gradient_enabled
+        fontformat.gradient_start_color = self.fontformat.gradient_start_color
+        fontformat.gradient_end_color = self.fontformat.gradient_end_color
+        fontformat.gradient_angle = self.fontformat.gradient_angle
+        fontformat.gradient_size = self.fontformat.gradient_size
         return fontformat
 
     def set_fontformat(self, ffmat: FontFormat, set_char_format=False, set_stroke_width=True, set_effect=True):
@@ -656,7 +670,18 @@ class TextBlkItem(QGraphicsTextItem):
         if ffmat.vertical:
             self.setLetterSpacing(ffmat.letter_spacing)
         self.setLineSpacing(ffmat.line_spacing)
+        
+        # Preserve gradient properties
+        self.fontformat.gradient_enabled = ffmat.gradient_enabled
+        self.fontformat.gradient_start_color = ffmat.gradient_start_color
+        self.fontformat.gradient_end_color = ffmat.gradient_end_color
+        self.fontformat.gradient_angle = ffmat.gradient_angle
+        self.fontformat.gradient_size = ffmat.gradient_size
+        
         self.fontformat.merge(ffmat)
+        
+        if self.fontformat.gradient_enabled:
+            self.update()
 
     def updateBlkFormat(self):
         fmt = self.get_fontformat()
@@ -778,6 +803,37 @@ class TextBlkItem(QGraphicsTextItem):
         cursor, after_kwargs = self._before_set_ffmt(set_selected, restore_cursor)
         cfmt = QTextCharFormat()
         cfmt.setFontUnderline(value)
+        self.set_cursor_cfmt(cursor, cfmt, True)
+        self._after_set_ffmt(cursor, repaint_background, restore_cursor, **after_kwargs)
+
+    def setGradientEnabled(self, value: bool, repaint_background: bool = True, set_selected: bool = False, restore_cursor: bool = False):
+        self.fontformat.gradient_enabled = value
+        cursor, after_kwargs = self._before_set_ffmt(set_selected, restore_cursor)
+        cfmt = QTextCharFormat()
+
+        if value:
+            gradient = QLinearGradient()
+            angle = self.fontformat.gradient_angle
+            rad = math.radians(angle)
+            dx = math.cos(rad)
+            dy = math.sin(rad)
+            
+            # Set gradient points with size adjustment
+            rect = self.boundingRect()
+            center = rect.center()
+            radius = max(rect.width(), rect.height()) * self.fontformat.gradient_size
+            gradient.setStart(center.x() - dx * radius, center.y() - dy * radius)
+            gradient.setFinalStop(center.x() + dx * radius, center.y() + dy * radius)
+            
+            # Set gradient colors
+            start_color = QColor(*self.fontformat.gradient_start_color)
+            end_color = QColor(*self.fontformat.gradient_end_color)
+            gradient.setColorAt(0, start_color)
+            gradient.setColorAt(1, end_color)
+            cfmt.setForeground(gradient)
+        else:
+            cfmt.setForeground(QColor(*self.fontformat.frgb))
+
         self.set_cursor_cfmt(cursor, cfmt, True)
         self._after_set_ffmt(cursor, repaint_background, restore_cursor, **after_kwargs)
 

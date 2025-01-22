@@ -220,6 +220,8 @@ def main():
     if args.headless:
         app_args = sys.argv + ['-platform', 'offscreen']
     app = QApplication(app_args)
+    app.setApplicationName('BalloonsTranslator')
+    app.setApplicationVersion(VERSION)
 
     if not args.headless:
         ps = QGuiApplication.primaryScreen()

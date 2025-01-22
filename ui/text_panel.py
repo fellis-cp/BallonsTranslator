@@ -2,7 +2,7 @@ import copy
 import sys
 from typing import List
 
-from qtpy.QtWidgets import QLineEdit, QSizePolicy, QHBoxLayout, QVBoxLayout, QFrame, QFontComboBox, QApplication, QPushButton, QLabel
+from qtpy.QtWidgets import QLineEdit, QSizePolicy, QHBoxLayout, QVBoxLayout, QFrame, QFontComboBox, QApplication, QPushButton, QLabel, QGroupBox, QCheckBox, QSlider
 from qtpy.QtCore import Signal, Qt
 from qtpy.QtGui import QFocusEvent, QMouseEvent, QTextCursor, QKeyEvent
 
@@ -11,7 +11,7 @@ from utils import config as C
 from utils.fontformat import FontFormat, px2pt, LineSpacingType
 from .custom_widget import Widget, ColorPickerLabel, ClickableLabel, CheckableLabel, TextCheckerLabel, AlignmentChecker, QFontChecker, SizeComboBox
 from .textitem import TextBlkItem
-from .text_graphical_effect import TextEffectPanelDeprecated
+from .text_graphical_effect import TextEffectPanelDeprecated, GradientPreviewPanel
 from .text_advanced_format import TextAdvancedFormatPanel
 from .text_style_presets import TextStylePresetPanel
 from . import funcmaps as FM
@@ -411,14 +411,23 @@ class FontFormatPanel(Widget):
         )
         self.textadvancedfmt_panel.param_changed.connect(self.on_param_changed)
 
-        self.effectBtn = ClickableLabel(self.tr("Effect"), self)
-        self.effectBtn.clicked.connect(self.on_effectbtn_clicked)
-        self.effect_panel = TextEffectPanelDeprecated(update_text_style_label=self.update_text_style_label)
-        self.effect_panel.hide()
-
+        self.shadowBtn = ClickableLabel(self.tr("Shadow"), self)
+        self.shadowBtn.clicked.connect(self.on_shadow_btn_clicked)
+        self.textadvancedfmt_panel.vlayout.addWidget(self.shadowBtn)
+        self.gradientBtn = ClickableLabel(self.tr("Gradient"), self)
+        self.gradientBtn.clicked.connect(self.on_gradient_btn_clicked)
+        self.textadvancedfmt_panel.vlayout.addWidget(self.gradientBtn)
+        
         self.foldTextBtn = CheckableLabel(self.tr("Unfold"), self.tr("Fold"), False)
         self.sourceBtn = TextCheckerLabel(self.tr("Source"))
         self.transBtn = TextCheckerLabel(self.tr("Translation"))
+        
+        self.effect_panel = TextEffectPanelDeprecated(update_text_style_label=self.update_text_style_label)
+        self.effect_panel.hide()
+        
+        self.gradient_panel = GradientPreviewPanel(update_text_style_label=self.update_text_style_label)
+        self.gradient_panel.gradient_changed.connect(self.on_gradient_changed)
+        self.gradient_panel.hide()
 
         FONTFORMAT_SPACING = 6
 
@@ -447,7 +456,6 @@ class FontFormatPanel(Widget):
         hl3.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hl3.addLayout(stroke_hlayout)
         hl3.addLayout(lettersp_hlayout)
-        hl3.addWidget(self.effectBtn)
         hl3.setContentsMargins(3, 0, 3, 0)
         hl3.setSpacing(13)
         hl4 = QHBoxLayout()
@@ -549,6 +557,7 @@ class FontFormatPanel(Widget):
         self.formatBtnGroup.underlineBtn.setChecked(font_format.underline)
         self.formatBtnGroup.italicBtn.setChecked(font_format.italic)
         self.alignBtnGroup.setAlignment(font_format.alignment)
+        
         self.familybox.blockSignals(False)
         # self.texteffect_panel.set_active_format(font_format)
         self.textadvancedfmt_panel.set_active_format(font_format)
@@ -588,6 +597,10 @@ class FontFormatPanel(Widget):
                 if focus_p == self or focus_p.parentWidget() == self:
                     focus_on_fmtoptions = True
             if not focus_on_fmtoptions:
+                # Store the current text block's format before switching to global
+                if self.textblk_item is not None:
+                    # Save all format properties including gradient state
+                    self.textblk_item.fontformat = copy.deepcopy(C.active_format)
                 self.textblk_item = None
                 self.set_active_format(self.global_format, multi_select)
                 if multi_select:
@@ -598,13 +611,37 @@ class FontFormatPanel(Widget):
         else:
             if not self.restoring_textblk:
                 blk_fmt = textblk_item.get_fontformat()
+                # Preserve gradient properties from the text block's format
+                if hasattr(textblk_item.fontformat, 'gradient_enabled'):
+                    blk_fmt.gradient_enabled = textblk_item.fontformat.gradient_enabled
+                    blk_fmt.gradient_start_color = textblk_item.fontformat.gradient_start_color
+                    blk_fmt.gradient_end_color = textblk_item.fontformat.gradient_end_color
+                    blk_fmt.gradient_angle = textblk_item.fontformat.gradient_angle
+                    blk_fmt.gradient_size = textblk_item.fontformat.gradient_size
                 self.textblk_item = textblk_item
                 multi_size = not textblk_item.isEditing() and textblk_item.isMultiFontSize()
                 self.set_active_format(blk_fmt, multi_size)
                 self.textstyle_panel.setTitle(f'TextBlock #{textblk_item.idx}')
 
-    def on_effectbtn_clicked(self):
+    def on_shadow_btn_clicked(self):
         self.effect_panel.active_fontfmt = C.active_format
         self.effect_panel.fontfmt = copy.deepcopy(C.active_format)
         self.effect_panel.updatePanels()
         self.effect_panel.show()
+
+    def on_gradient_btn_clicked(self):
+        self.gradient_panel.active_fontfmt = C.active_format
+        self.gradient_panel.fontfmt = copy.deepcopy(C.active_format)
+        self.gradient_panel.updatePanels()
+        self.gradient_panel.show()
+
+    def on_gradient_changed(self):
+        """Handle gradient changes from the preview panel"""
+        start_color = self.gradient_panel.gradient_start_picker.color.getRgb()[:3]
+        end_color = self.gradient_panel.gradient_end_picker.color.getRgb()[:3]
+        
+        self.on_param_changed('gradient_enabled', self.gradient_panel.fontfmt.gradient_enabled)
+        self.on_param_changed('gradient_start_color', start_color)
+        self.on_param_changed('gradient_end_color', end_color)
+        self.on_param_changed('gradient_angle', self.gradient_panel.fontfmt.gradient_angle)
+        self.on_param_changed('gradient_size', self.gradient_panel.fontfmt.gradient_size)

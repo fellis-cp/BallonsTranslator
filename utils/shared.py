@@ -4,7 +4,7 @@ import os.path as osp
 import json
 import sys
 
-ICON_PATH = 'icons/[ICONNAME]'
+ICON_PATH = 'icons/icon.icns'
 
 PROGRAM_PATH = osp.abspath(osp.dirname(osp.dirname(__file__)))
 LOGGING_PATH = osp.join(PROGRAM_PATH, 'logs')
