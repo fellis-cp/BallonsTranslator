@@ -156,7 +156,7 @@ class SourceTextEdit(QTextEdit):
             self.text_content_changed = True
             if self.hasFocus():
                 self.change_from = from_
-                self.change_added = added - removed
+                self.change_added = added
 
     def adjustSize(self):
         h = self.document().documentLayout().documentSize().toSize().height()
@@ -176,7 +176,6 @@ class SourceTextEdit(QTextEdit):
             
             change_from = self.change_from
             added_text = ''
-            input_method_used = False
             
             if self.paste_flag:
                 self.paste_flag = False
@@ -189,7 +188,6 @@ class SourceTextEdit(QTextEdit):
                 if self.input_method_from != -1:
                     added_text = self.input_method_text
                     change_from = self.input_method_from
-                    input_method_used = True
                     self.input_method_from = -1
                 elif self.change_added > 0:
                     cursor = self.textCursor()
@@ -197,9 +195,12 @@ class SourceTextEdit(QTextEdit):
                     cursor.setPosition(change_from + self.change_added, QTextCursor.MoveMode.KeepAnchor) 
                     added_text = cursor.selectedText()
 
-            self.propagate_user_edited.emit(change_from, added_text, input_method_used)
             undo_steps = self.document().availableUndoSteps()
             new_steps = undo_steps - self.old_undo_steps
+            joint_previous = new_steps == 0
+            self.propagate_user_edited.emit(change_from, added_text, joint_previous)
+            self.change_added = 0
+
             if new_steps > 0:
                 self.old_undo_steps = undo_steps
                 self.push_undo_stack.emit(new_steps)

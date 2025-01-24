@@ -18,34 +18,21 @@ from .config_proj import ProjImgTrans
 from .scene_textlayout import PUNSET_HALF
 
 
-def propagate_user_edit(src_edit: Union[TransTextEdit, TextBlkItem], target_edit: Union[TransTextEdit, TextBlkItem], pos: int, added_text: str, input_method_used: bool):
-
+def propagate_user_edit(src_edit: Union[TransTextEdit, TextBlkItem], target_edit: Union[TransTextEdit, TextBlkItem], pos: int, added_text: str, joint_previous: bool = False):
     ori_count = target_edit.document().characterCount()
     new_count = src_edit.document().characterCount()
     removed = ori_count + len(added_text) - new_count
 
-    new_editblock = False
-    if input_method_used or added_text not in PUNSET_HALF:
-        new_editblock = True
-
     cursor = target_edit.textCursor()
-    if len(added_text) > 0:
-        cursor.setPosition(pos)
-        if removed > 0:
-            cursor.setPosition(pos + removed, QTextCursor.MoveMode.KeepAnchor)
-        if new_editblock:
-            cursor.beginEditBlock()
-        cursor.insertText(added_text)
-        if new_editblock:
-            cursor.endEditBlock()
-    elif removed > 0:
-        if removed == 1:
-            cursor.setPosition(pos + removed - 1)
-            cursor.deleteChar()
-        else:
-            cursor.setPosition(pos)
-            cursor.setPosition(pos + removed, QTextCursor.MoveMode.KeepAnchor)
-            cursor.removeSelectedText()
+    cursor.setPosition(pos)
+    if joint_previous:
+        cursor.joinPreviousEditBlock()
+    else:
+        cursor.beginEditBlock()
+    if removed > 0:
+        cursor.setPosition(pos + removed, QTextCursor.MoveMode.KeepAnchor)
+    cursor.insertText(added_text)
+    cursor.endEditBlock()
     target_edit.old_undo_steps = target_edit.document().availableUndoSteps()
 
 
@@ -277,8 +264,7 @@ class TextItemEditCommand(QUndoCommand):
             return
         
         self.blkitem.repaint_on_changed = False
-        for _ in range(self.num_steps):
-            self.blkitem.redo()
+        self.blkitem.redo()
         self.blkitem.repaint_on_changed = True
         if self.num_steps > 0:
             self.blkitem.repaint_background()
@@ -292,8 +278,7 @@ class TextItemEditCommand(QUndoCommand):
 
     def undo(self):
         self.blkitem.repaint_on_changed = False
-        for _ in range(self.num_steps):
-            self.blkitem.undo()
+        self.blkitem.undo()
         self.blkitem.repaint_on_changed = True
         if self.num_steps > 0:
             self.blkitem.repaint_background()
@@ -319,15 +304,12 @@ class TextEditCommand(QUndoCommand):
         if self.op_counter == 0:
             self.op_counter += 1
             return
-
-        for _ in range(self.num_steps):
-            self.edit.redo()
+        self.edit.redo()
         if self.blkitem is not None:
             self.blkitem.redo()
 
     def undo(self):
-        for _ in range(self.num_steps):
-            self.edit.undo()
+        self.edit.undo()
         if self.blkitem is not None:
             self.blkitem.undo()
 

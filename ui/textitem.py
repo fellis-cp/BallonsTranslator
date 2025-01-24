@@ -91,30 +91,27 @@ class TextBlkItem(QGraphicsTextItem):
         if (self.hasFocus() or self.is_formatting) and not self.pre_editing and not self.block_change_signal:   
             # self.content_changed.emit(self)
             if not self.in_redo_undo:
+                undo_steps = self.document().availableUndoSteps()
+                new_steps = undo_steps - self.old_undo_steps
+                joint_previous = new_steps == 0
 
                 if not self.is_formatting:
                     change_from = self.change_from
                     added_text = ''
-                    input_method_used = False
                     if self.input_method_from != -1:
                         added_text = self.input_method_text
                         change_from = self.input_method_from
-                        input_method_used = True
-            
                         self.input_method_from = -1
 
                     elif self.change_added > 0:
                         cursor = self.textCursor()
                         cursor.setPosition(change_from)
-                        cursor.setPosition(change_from + self.change_added, QTextCursor.MoveMode.KeepAnchor) 
-
+                        cursor.setPosition(change_from + self.change_added, QTextCursor.MoveMode.KeepAnchor)
                         added_text = cursor.selectedText()
 
-                    # print(change_from, added_text, input_method_used, self.change_from, self.change_added)
-                    self.propagate_user_edited.emit(change_from, added_text, input_method_used)
+                    self.propagate_user_edited.emit(change_from, added_text, joint_previous)
+                    self.change_added = 0
 
-                undo_steps = self.document().availableUndoSteps()
-                new_steps = undo_steps - self.old_undo_steps
                 if new_steps > 0:
                     self.old_undo_steps = undo_steps
                     self.push_undo_stack.emit(new_steps, self.is_formatting)
@@ -399,7 +396,7 @@ class TextBlkItem(QGraphicsTextItem):
         if not self.pre_editing:
             if self.hasFocus():
                 self.change_from = from_
-                self.change_added = added - removed
+                self.change_added = added
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
 
@@ -716,6 +713,7 @@ class TextBlkItem(QGraphicsTextItem):
             cursor = QTextCursor(self.document())
             cursor.select(QTextCursor.SelectionType.Document)
 
+        cursor.beginEditBlock()
         return cursor, dict(cursor_pos=cursor_pos, has_set_all=has_set_all)
 
     def _after_set_ffmt(self, cursor: QTextCursor, repaint_background: bool, restore_cursor: bool, cursor_pos: Tuple, has_set_all: bool):
@@ -733,6 +731,7 @@ class TextBlkItem(QGraphicsTextItem):
         if repaint_background:
             self.repaint_background()
 
+        cursor.endEditBlock()
         self.is_formatting = False
 
     def setFontFamily(self, value: str, repaint_background: bool = True, set_selected: bool = False, restore_cursor: bool = False):
