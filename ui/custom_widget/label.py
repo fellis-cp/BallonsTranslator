@@ -7,6 +7,8 @@ from qtpy.QtGui import QMouseEvent, QWheelEvent, QColor
 
 
 from utils.shared import CONFIG_FONTSIZE_CONTENT
+from utils import shared
+
 
 class FadeLabel(QLabel):
     def __init__(self, *args, **kwargs):
@@ -42,9 +44,10 @@ class FadeLabel(QLabel):
 class ColorPickerLabel(QLabel):
     colorChanged = Signal(bool)
     changingColor = Signal()
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, parent=None, param_name='', *args, **kwargs):
+        super().__init__(parent=parent, *args, **kwargs)
         self.color: QColor = None
+        self.param_name = param_name
 
     def mousePressEvent(self, event):
         self.changingColor.emit()
@@ -71,6 +74,11 @@ class ColorPickerLabel(QLabel):
     def rgba(self) -> List:
         color = self.color
         return (color.red(), color.green(), color.blue(), color.alpha())
+    
+
+class SmallColorPickerLabel(ColorPickerLabel):
+    pass
+
 
 
 class ClickableLabel(QLabel):
@@ -167,8 +175,62 @@ class SmallParamLabel(QLabel):
         else:
             self.setAlignment(alignment)
 
-        # font = self.font()
-        # font.setPointSizeF(CONFIG_FONTSIZE_CONTENT-2)
-        # self.setFont(font)
         self.setText(param_name)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+
+class SizeControlLabel(QLabel):
+
+    btn_released = Signal()
+    size_ctrl_changed = Signal(int)
+
+    def __init__(self, parent=None, direction=0, text='', alignment=None, transparent_bg=True):
+        super().__init__(parent)
+        if text:
+            self.setText(text)
+        if direction == 0:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.cur_pos = 0
+        self.direction = direction
+        self.mouse_pressed = False
+        if transparent_bg:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if alignment is not None:
+            self.setAlignment(alignment)
+
+    def mousePressEvent(self, e: QMouseEvent) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.mouse_pressed = True
+            if shared.FLAG_QT6:
+                g_pos = e.globalPosition().toPoint()
+            else:
+                g_pos = e.globalPos()
+            self.cur_pos = g_pos.x() if self.direction == 0 else g_pos.y()
+        return super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.mouse_pressed = False
+            self.btn_released.emit()
+        return super().mouseReleaseEvent(e)
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:
+        if self.mouse_pressed:
+            if shared.FLAG_QT6:
+                g_pos = e.globalPosition().toPoint()
+            else:
+                g_pos = e.globalPos()
+            if self.direction == 0:
+                new_pos = g_pos.x()
+                self.size_ctrl_changed.emit(new_pos - self.cur_pos)
+            else:
+                new_pos = g_pos.y()
+                self.size_ctrl_changed.emit(self.cur_pos - new_pos)
+            self.cur_pos = new_pos
+        return super().mouseMoveEvent(e)
+    
+
+class SmallSizeControlLabel(SizeControlLabel):
+    pass

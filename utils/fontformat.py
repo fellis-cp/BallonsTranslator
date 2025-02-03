@@ -76,13 +76,11 @@ class FontFormat(Config):
     shadow_strength: float = 1.
     shadow_color: List = field(default_factory=lambda: [0, 0, 0])
     shadow_offset: List = field(default_factory=lambda: [0., 0.])
-    # Gradient properties
     gradient_enabled: bool = False
     gradient_start_color: List = field(default_factory=lambda: [0, 0, 0])
     gradient_end_color: List = field(default_factory=lambda: [255, 255, 255])
     gradient_angle: float = 0.
     gradient_size: float = 1.0
-    gradient_applied: bool = False
     _style_name: str = ''
     line_spacing_type: int = LineSpacingType.Proportional
 

@@ -47,6 +47,7 @@ class TextBlkItem(QGraphicsTextItem):
         self.under_ctrl = False
         self.draw_rect = show_rect
         self._display_rect: QRectF = QRectF(0, 0, 1, 1)
+        self.old_ffmt_values = None
         
         self.idx = idx
         
@@ -243,7 +244,7 @@ class TextBlkItem(QGraphicsTextItem):
             self.setTextCursor(cursor)
         if self.fontformat.gradient_enabled:
             self.setGradientEnabled(True)
-        self.update_effect(font_fmt, repaint=False)
+        self.setShadow(font_fmt, repaint=False)
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
         self.repaint_background()
 
@@ -614,6 +615,7 @@ class TextBlkItem(QGraphicsTextItem):
         return fontformat
 
     def set_fontformat(self, ffmat: FontFormat, set_char_format=False, set_stroke_width=True, set_effect=True):
+        self.repainting = True
         if self.fontformat.vertical != ffmat.vertical:
             self.setVertical(ffmat.vertical)
 
@@ -634,7 +636,11 @@ class TextBlkItem(QGraphicsTextItem):
 
         self.document().setDefaultFont(font)
         format.setFont(font)
-        format.setForeground(QColor(*ffmat.foreground_color()))
+        if ffmat.gradient_enabled:
+            gradient = self.get_text_gradient(ffmat)
+            format.setForeground(gradient)
+        else:
+            format.setForeground(QColor(*ffmat.foreground_color()))
         if not ffmat.bold:
             format.setFontWeight(fweight)
         format.setFontItalic(ffmat.italic)
@@ -654,9 +660,10 @@ class TextBlkItem(QGraphicsTextItem):
         self.stroke_qcolor = QColor(*ffmat.stroke_color())
 
         if set_effect:
-            self.update_effect(ffmat)
+            self.setShadow(ffmat, repaint=False)
         if set_stroke_width:
-            self.setStrokeWidth(ffmat.stroke_width)
+            self.setStrokeWidth(ffmat.stroke_width, repaint_background=False)
+        self.setOpacity(ffmat.opacity)
         
         alignment_qt_flag = [Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignCenter, Qt.AlignmentFlag.AlignRight][ffmat.alignment]
         doc = self.document()
@@ -679,6 +686,10 @@ class TextBlkItem(QGraphicsTextItem):
         
         if self.fontformat.gradient_enabled:
             self.update()
+
+        self.repainting = False
+        if set_effect or set_stroke_width:
+            self.repaint_background()
 
     def updateBlkFormat(self):
         fmt = self.get_fontformat()
@@ -809,32 +820,37 @@ class TextBlkItem(QGraphicsTextItem):
         self.fontformat.gradient_enabled = value
         cursor, after_kwargs = self._before_set_ffmt(set_selected, restore_cursor)
         cfmt = QTextCharFormat()
-
         if value:
-            gradient = QLinearGradient()
-            angle = self.fontformat.gradient_angle
-            rad = math.radians(angle)
-            dx = math.cos(rad)
-            dy = math.sin(rad)
-            
-            # Set gradient points with size adjustment
-            rect = self.boundingRect()
-            center = rect.center()
-            radius = max(rect.width(), rect.height()) * self.fontformat.gradient_size
-            gradient.setStart(center.x() - dx * radius, center.y() - dy * radius)
-            gradient.setFinalStop(center.x() + dx * radius, center.y() + dy * radius)
-            
-            # Set gradient colors
-            start_color = QColor(*self.fontformat.gradient_start_color)
-            end_color = QColor(*self.fontformat.gradient_end_color)
-            gradient.setColorAt(0, start_color)
-            gradient.setColorAt(1, end_color)
+            gradient = self.get_text_gradient()
             cfmt.setForeground(gradient)
         else:
             cfmt.setForeground(QColor(*self.fontformat.frgb))
 
         self.set_cursor_cfmt(cursor, cfmt, True)
         self._after_set_ffmt(cursor, repaint_background, restore_cursor, **after_kwargs)
+
+    def get_text_gradient(self, fontformat: FontFormat = None):
+        gradient = QLinearGradient()
+        if fontformat is None:
+            fontformat = self.fontformat
+        angle = fontformat.gradient_angle
+        rad = math.radians(angle)
+        dx = math.cos(rad)
+        dy = math.sin(rad)
+        
+        # Set gradient points with size adjustment
+        rect = self.boundingRect()
+        center = rect.center()
+        radius = max(rect.width(), rect.height()) * fontformat.gradient_size
+        gradient.setStart(center.x() - dx * radius, center.y() - dy * radius)
+        gradient.setFinalStop(center.x() + dx * radius, center.y() + dy * radius)
+        
+        # Set gradient colors
+        start_color = QColor(*fontformat.gradient_start_color)
+        end_color = QColor(*fontformat.gradient_end_color)
+        gradient.setColorAt(0, start_color)
+        gradient.setColorAt(1, end_color)
+        return gradient
 
     def setLineSpacing(self, value: float, repaint_background: bool = True, set_selected: bool = False, restore_cursor: bool = False):
         self.is_formatting = True
@@ -984,9 +1000,7 @@ class TextBlkItem(QGraphicsTextItem):
                 break
         return char_fmts
 
-    def update_effect(self, fmt: FontFormat, repaint=True):
-        self.setOpacity(fmt.opacity)
-        self.fontformat.opacity = fmt.opacity
+    def setShadow(self, fmt: FontFormat, repaint=True):
         self.fontformat.shadow_radius = fmt.shadow_radius
         self.fontformat.shadow_strength = fmt.shadow_strength
         self.fontformat.shadow_color = fmt.shadow_color
@@ -995,6 +1009,23 @@ class TextBlkItem(QGraphicsTextItem):
             self.setPadding(self.layout.max_font_size(to_px=True))
         if repaint:
             self.repaint_background()
+
+    def setBGAttribute(self, attr_name: str, value, repaint=True):
+        setattr(self.fontformat, attr_name, value)
+        if repaint:
+            self.repaint_background()
+            self.update()
+
+    def setGradientAttribute(self, attr_name: str, value):
+        self.old_ffmt_values = {}
+        self.old_ffmt_values[attr_name] = self.fontformat[attr_name]
+        setattr(self.fontformat, attr_name, value)
+        self.setGradientEnabled(self.fontformat.gradient_enabled)
+        self.old_ffmt_values = None
+
+    def setOpacity(self, opacity: float):
+        super().setOpacity(opacity)
+        self.fontformat.opacity = opacity
 
     def setPlainTextAndKeepUndoStack(self, text: str):
         cursor = QTextCursor(self.document())

@@ -15,10 +15,9 @@ from .textitem import TextBlkItem, TextBlock
 from .canvas import Canvas
 from .textedit_area import TransTextEdit, SourceTextEdit, TransPairWidget, SelectTextMiniMenu, TextEditListScrollArea, QVBoxLayout, Widget
 from utils.fontformat import FontFormat
-from .textedit_commands import propagate_user_edit, TextEditCommand, ReshapeItemCommand, MoveBlkItemsCommand, AutoLayoutCommand, ApplyFontformatCommand, ApplyEffectCommand, RotateItemCommand, TextItemEditCommand, TextEditCommand, PageReplaceOneCommand, PageReplaceAllCommand, MultiPasteCommand, ResetAngleCommand, SqueezeCommand
+from .textedit_commands import propagate_user_edit, TextEditCommand, ReshapeItemCommand, MoveBlkItemsCommand, AutoLayoutCommand, ApplyFontformatCommand, RotateItemCommand, TextItemEditCommand, TextEditCommand, PageReplaceOneCommand, PageReplaceAllCommand, MultiPasteCommand, ResetAngleCommand, SqueezeCommand
 from .text_panel import FontFormatPanel
 from utils.config import pcfg
-from utils import config as C
 from utils import shared
 from utils.imgproc_utils import extract_ballon_region, rotate_polygons, get_block_mask
 from utils.text_processing import seg_text, is_cjk
@@ -305,7 +304,6 @@ class TextPanel(Widget):
         super().__init__(*args, **kwargs)
         layout = QVBoxLayout(self)
         self.textEditList = TextEditListScrollArea(self)
-        self.activePair: TransPairWidget = None
         self.formatpanel = FontFormatPanel(app, self)
         layout.addWidget(self.formatpanel)
         layout.addWidget(self.textEditList)
@@ -347,7 +345,6 @@ class SceneTextManager(QObject):
         self.textEditList.selection_changed.connect(self.on_transwidget_selection_changed)
         self.textEditList.rearrange_blks.connect(self.on_rearrange_blks)
         self.formatpanel = textpanel.formatpanel
-        self.formatpanel.effect_panel.apply.connect(self.on_apply_effect)
         self.formatpanel.textstyle_panel.apply_fontfmt.connect(self.onFormatTextblks)
 
         self.imgtrans_proj = self.canvas.imgtrans_proj
@@ -1060,12 +1057,6 @@ class SceneTextManager(QObject):
 
     def on_rearrange_blks(self, mv_map: Tuple[np.ndarray]):
         self.canvas.push_undo_command(RearrangeBlksCommand(mv_map, self))
-
-    def on_apply_effect(self):
-        ffmt = C.active_format
-        selected_blks = self.canvas.selected_text_items()
-        if len(selected_blks) > 0:
-            self.canvas.push_undo_command(ApplyEffectCommand(selected_blks, ffmt))
 
     def updateTextBlkItemIdx(self, sel_ids: set = None):
         for ii, blk_item in enumerate(self.textblk_item_list):

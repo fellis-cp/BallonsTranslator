@@ -93,26 +93,6 @@ class ApplyFontformatCommand(QUndoCommand):
             item.setRect(rect)
             edit.document().clearUndoRedoStacks()
 
-
-class ApplyEffectCommand(QUndoCommand):
-    def __init__(self, items: List[TextBlkItem], fontformat: FontFormat):
-        super(ApplyEffectCommand, self).__init__()
-        self.items = items
-        self.old_fmt_lst: List[FontFormat] = []
-        self.new_fmt = fontformat
-        for item in items:
-            self.old_fmt_lst.append(item.get_fontformat())
-
-    def redo(self):
-        for item in self.items:
-            item.update_effect(self.new_fmt)
-            item.update()
-
-    def undo(self):
-        for item, fmt in zip(self.items, self.old_fmt_lst):
-            item.update_effect(fmt)
-            item.update()
-
     
 class ReshapeItemCommand(QUndoCommand):
     def __init__(self, item: TextBlkItem):
@@ -256,6 +236,12 @@ class TextItemEditCommand(QUndoCommand):
         self.blkitem = blkitem
         self.num_steps = num_steps
         self.is_formatting = blkitem.is_formatting
+        self.old_ffmt_values = self.new_ffmt_values = None
+        if blkitem.is_formatting and blkitem.old_ffmt_values is not None:
+            self.old_ffmt_values = blkitem.old_ffmt_values.copy()
+            self.new_ffmt_values = self.old_ffmt_values.copy()
+            for k in self.new_ffmt_values:
+                self.new_ffmt_values[k] = getattr(blkitem.fontformat, k)
         self.formatpanel = formatpanel
 
     def redo(self):
@@ -264,6 +250,9 @@ class TextItemEditCommand(QUndoCommand):
             return
         
         self.blkitem.repaint_on_changed = False
+        if self.new_ffmt_values is not None:
+            for k, v in self.new_ffmt_values.items():
+                self.blkitem.fontformat[k] = v
         self.blkitem.redo()
         self.blkitem.repaint_on_changed = True
         if self.num_steps > 0:
@@ -278,6 +267,9 @@ class TextItemEditCommand(QUndoCommand):
 
     def undo(self):
         self.blkitem.repaint_on_changed = False
+        if self.old_ffmt_values is not None:
+            for k, v in self.old_ffmt_values.items():
+                self.blkitem.fontformat[k] = v
         self.blkitem.undo()
         self.blkitem.repaint_on_changed = True
         if self.num_steps > 0:

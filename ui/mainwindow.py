@@ -192,8 +192,6 @@ class MainWindow(mainwindow_cls):
         
         self.drawingPanel = DrawingPanel(self.canvas, self.configPanel.inpaint_config_panel)
         self.textPanel = TextPanel(self.app)
-        self.textPanel.formatpanel.effect_panel.setParent(self)
-        self.textPanel.formatpanel.effect_panel.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint)
         self.textPanel.formatpanel.foldTextBtn.checkStateChanged.connect(self.fold_textarea)
         self.textPanel.formatpanel.sourceBtn.checkStateChanged.connect(self.show_source_text)
         self.textPanel.formatpanel.transBtn.checkStateChanged.connect(self.show_trans_text)

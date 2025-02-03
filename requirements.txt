@@ -44,7 +44,7 @@ py7zr
 multivolumefile
 httpx[socks,brotli]
 langdetect
-translators
+translators==5.9.5
 json5
 pywin32; sys_platform == 'win32'
 winsdk; sys_platform == 'win32'

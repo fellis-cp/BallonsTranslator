@@ -145,12 +145,34 @@ SizeComboBox::drop-down {
     width: 12px;
 }
 
+SizeControlLabel {
+    font-size: 14px;
+}
+
+
+SmallSizeControlLabel {
+    font-size: 12px;
+}
+
 QLabel#lineSpacingLabel {
     image: url(icons/fontfmt_linespacing.svg);
     max-width: 25px;
     max-height: 25px;
     min-width: 25px;
     min-height: 25px;
+}
+
+QGroupBox {
+    font-size: 14px;
+    border: 1px solid @borderColor;
+    margin-top: 9px;
+    border-radius: 6px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 7px;
+    padding: 0px 5px 0px 5px;
 }
 
 QLabel#letterSpacingLabel {
@@ -171,6 +193,14 @@ ColorPickerLabel {
 
 ColorPickerLabel::hover {
     border: 2px solid rgb(30, 147, 229);
+}
+
+SmallColorPickerLabel {
+    max-height: 17px;
+    min-height: 17px;
+    min-width: 17px;
+    max-width: 17px;
+    border: 1px solid @borderColor;
 }
 
 AlignmentChecker {
@@ -1012,6 +1042,14 @@ SmallParamLabel {
 }
 
 SmallComboBox {
+    height: 20px;
+    font-size: 12px;
+    /* padding-left: 8px; */
+    border: 1px solid @borderColor;
+    background-color: @transtexteditBackgroundColor;
+}
+
+SmallSizeComboBox {
     height: 20px;
     font-size: 12px;
     /* padding-left: 8px; */

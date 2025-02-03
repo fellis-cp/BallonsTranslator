@@ -8,11 +8,21 @@ from utils import shared
 from utils.config import pcfg
 
 CHEVRON_SIZE = 20
+CHEVRON_SIZE_SMALL = 14
+
 def chevron_down():
     return QIcon(r'icons/chevron-down.svg').pixmap(CHEVRON_SIZE, CHEVRON_SIZE, mode=QIcon.Mode.Normal)
 
 def chevron_right():
     return QIcon(r'icons/chevron-right.svg').pixmap(CHEVRON_SIZE, CHEVRON_SIZE, mode=QIcon.Mode.Normal)
+
+def chevron_down_small():
+    return QIcon(r'icons/chevron-down.svg').pixmap(CHEVRON_SIZE_SMALL, CHEVRON_SIZE_SMALL, mode=QIcon.Mode.Normal)
+
+def chevron_right_small():
+    return QIcon(r'icons/chevron-right.svg').pixmap(CHEVRON_SIZE_SMALL, CHEVRON_SIZE_SMALL, mode=QIcon.Mode.Normal)
+
+
 
 
 class HidePanelButton(QPushButton):
@@ -23,19 +33,32 @@ class ExpandLabel(Widget):
 
     clicked = Signal()
 
-    def __init__(self, text=None, parent=None, *args, **kwargs):
+    def __init__(self, text=None, parent=None, size_type='normal', *args, **kwargs):
         super().__init__(parent=parent, *args, **kwargs)
+        self.size_type = size_type
         self.textlabel = QLabel(self)
         self.textlabel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        font = self.textlabel.font()
-        if shared.ON_MACOS:
-            font.setPointSize(13)
-        else:
-            font.setPointSizeF(10)
-        self.textlabel.setFont(font)
         self.arrowlabel = QLabel(self)
-        self.arrowlabel.setFixedSize(CHEVRON_SIZE, CHEVRON_SIZE)
         self.arrowlabel.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        font = self.textlabel.font()
+        if size_type == 'normal':
+            if shared.ON_MACOS:
+                font.setPointSize(13)
+            else:
+                font.setPointSizeF(10)
+            self.setFixedHeight(26)
+            self.arrowlabel.setFixedSize(CHEVRON_SIZE, CHEVRON_SIZE)
+        elif size_type == 'small':
+            if shared.ON_MACOS:
+                font.setPointSize(10)
+            else:
+                font.setPointSizeF(8)
+            self.setFixedHeight(20)
+            self.arrowlabel.setFixedSize(CHEVRON_SIZE_SMALL, CHEVRON_SIZE_SMALL)
+        else:
+            raise
+            
+        self.textlabel.setFont(font)
         self.hidelabel = HidePanelButton(self)
         self.hidelabel.setVisible(False)
 
@@ -51,7 +74,6 @@ class ExpandLabel(Widget):
     
         self.expanded = True
         self.setExpand(True)
-        self.setFixedHeight(26)
 
     def enterEvent(self, event) -> None:
         self.hidelabel.setVisible(True)
@@ -81,6 +103,7 @@ class PanelArea(QScrollArea):
     def __init__(self, panel_name: str, config_name: str, config_expand_name: str, action_name: str = None):
         super().__init__()
         self.scrollContent = PanelAreaContent()
+        self.scrollContent.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.setWidget(self.scrollContent)
         self.setWidgetResizable(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -114,7 +137,12 @@ class PanelGroupBox(QGroupBox):
 
 
 class PanelAreaContent(Widget):
-    pass
+
+    after_resized = Signal()
+    
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.after_resized.emit()
 
 
 class ViewWidget(Widget):
@@ -125,10 +153,10 @@ class ViewWidget(Widget):
     view_hide_btn_clicked = Signal(str)
     expend_changed = Signal()
 
-    def __init__(self, content_widget: Widget, panel_name: str = None, parent=None, *args, **kwargs):
+    def __init__(self, content_widget: Widget, panel_name: str = None, parent=None, title_size_type='normal', *args, **kwargs):
         super().__init__(parent=parent, *args, **kwargs)
         
-        self.title_label = ExpandLabel(panel_name, self)
+        self.title_label = ExpandLabel(panel_name, self, size_type=title_size_type)
         self.title_label.hidelabel.clicked.connect(self.on_view_hide_btn_clicked)
         self.content_widget = content_widget
 

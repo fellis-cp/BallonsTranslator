@@ -9,9 +9,8 @@ from qtpy.QtGui import QFocusEvent, QMouseEvent, QTextCursor, QKeyEvent
 from utils import shared
 from utils import config as C
 from utils.fontformat import FontFormat, px2pt, LineSpacingType
-from .custom_widget import Widget, ColorPickerLabel, ClickableLabel, CheckableLabel, TextCheckerLabel, AlignmentChecker, QFontChecker, SizeComboBox
+from .custom_widget import Widget, ColorPickerLabel, ClickableLabel, CheckableLabel, TextCheckerLabel, AlignmentChecker, QFontChecker, SizeComboBox, SizeControlLabel
 from .textitem import TextBlkItem
-from .text_graphical_effect import TextEffectPanelDeprecated, GradientPreviewPanel
 from .text_advanced_format import TextAdvancedFormatPanel
 from .text_style_presets import TextStylePresetPanel
 from . import funcmaps as FM
@@ -206,55 +205,6 @@ class FontSizeBox(QFrame):
             else:
                 self.param_changed.emit('rel_font_size', raito)
                 self.fcombobox.setCurrentText(str(newsize)+"+")
-
-
-class SizeControlLabel(QLabel):
-
-    btn_released = Signal()
-    size_ctrl_changed = Signal(int)
-
-    def __init__(self, parent=None, direction=0, text=''):
-        super().__init__(parent)
-        if text:
-            self.setText(text)
-        if direction == 0:
-            self.setCursor(Qt.CursorShape.SizeHorCursor)
-        else:
-            self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.cur_pos = 0
-        self.direction = direction
-        self.mouse_pressed = False
-
-    def mousePressEvent(self, e: QMouseEvent) -> None:
-        if e.button() == Qt.MouseButton.LeftButton:
-            self.mouse_pressed = True
-            if shared.FLAG_QT6:
-                g_pos = e.globalPosition().toPoint()
-            else:
-                g_pos = e.globalPos()
-            self.cur_pos = g_pos.x() if self.direction == 0 else g_pos.y()
-        return super().mousePressEvent(e)
-
-    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
-        if e.button() == Qt.MouseButton.LeftButton:
-            self.mouse_pressed = False
-            self.btn_released.emit()
-        return super().mouseReleaseEvent(e)
-
-    def mouseMoveEvent(self, e: QMouseEvent) -> None:
-        if self.mouse_pressed:
-            if shared.FLAG_QT6:
-                g_pos = e.globalPosition().toPoint()
-            else:
-                g_pos = e.globalPos()
-            if self.direction == 0:
-                new_pos = g_pos.x()
-                self.size_ctrl_changed.emit(new_pos - self.cur_pos)
-            else:
-                new_pos = g_pos.y()
-                self.size_ctrl_changed.emit(self.cur_pos - new_pos)
-            self.cur_pos = new_pos
-        return super().mouseMoveEvent(e)
     
 
 class FontFamilyComboBox(QFontComboBox):
@@ -266,15 +216,12 @@ class FontFamilyComboBox(QFontComboBox):
         lineedit.return_pressed.connect(self.on_return_pressed)
         self.setLineEdit(lineedit)
         self.emit_if_focused = emit_if_focused
-        self._current_font = self.currentFont().family()
         self.return_pressed = False
         
     def apply_fontfamily(self):
         ffamily = self.currentFont().family()
         if ffamily in shared.FONT_FAMILIES:
             self.param_changed.emit('font_family', ffamily)
-            self._current_font = ffamily
-
 
     def update_font_list(self, font_list):
         self.currentFontChanged.disconnect(self.on_fontfamily_changed)
@@ -322,7 +269,7 @@ class FontFormatPanel(Widget):
         self.fontsizebox.fcombobox.setToolTip(self.tr("Change font size"))
         self.fontsizebox.param_changed.connect(self.on_param_changed)
         
-        self.lineSpacingLabel = SizeControlLabel(self, direction=1)
+        self.lineSpacingLabel = SizeControlLabel(self, direction=1, transparent_bg=False)
         self.lineSpacingLabel.setObjectName("lineSpacingLabel")
         self.lineSpacingLabel.size_ctrl_changed.connect(self.onLineSpacingCtrlChanged)
         self.lineSpacingLabel.btn_released.connect(lambda : self.on_param_changed('line_spacing', self.lineSpacingBox.value()))
@@ -331,13 +278,11 @@ class FontFormatPanel(Widget):
         self.lineSpacingBox.addItems(["1.0", "1.1", "1.2"])
         self.lineSpacingBox.setToolTip(self.tr("Change line spacing"))
         self.lineSpacingBox.param_changed.connect(self.on_param_changed)
-        self.lineSpacingBox.editTextChanged.connect(self.onLineSpacingEditorChanged)
         
-        self.colorPicker = ColorPickerLabel(self)
-        self.colorPicker.setObjectName("FontColorPicker")
+        self.colorPicker = ColorPickerLabel(self, param_name='frgb')
         self.colorPicker.setToolTip(self.tr("Change font color"))
         self.colorPicker.changingColor.connect(self.changingColor)
-        self.colorPicker.colorChanged.connect(self.onColorChanged)
+        self.colorPicker.colorChanged.connect(self.onColorLabelChanged)
 
         self.alignBtnGroup = AlignmentBtnGroup(self)
         self.alignBtnGroup.param_changed.connect(self.on_param_changed)
@@ -349,24 +294,23 @@ class FontFormatPanel(Widget):
         self.verticalChecker.setObjectName("FontVerticalChecker")
         self.verticalChecker.clicked.connect(lambda : self.on_param_changed('vertical', self.verticalChecker.isChecked()))
 
+        self.strokeWidthBox = SizeComboBox([0, 10], 'stroke_width', self)
+        self.strokeWidthBox.addItems(["0.1"])
+        self.strokeWidthBox.setToolTip(self.tr("Change stroke width"))
+        self.strokeWidthBox.param_changed.connect(self.on_param_changed)
+
         self.fontStrokeLabel = SizeControlLabel(self, 0, self.tr("Stroke"))
         self.fontStrokeLabel.setObjectName("fontStrokeLabel")
         font = self.fontStrokeLabel.font()
         font.setPointSizeF(shared.CONFIG_FONTSIZE_CONTENT * 0.95)
         self.fontStrokeLabel.setFont(font)
-        self.fontStrokeLabel.size_ctrl_changed.connect(self.onStrokeCtrlChanged)
+        self.fontStrokeLabel.size_ctrl_changed.connect(self.strokeWidthBox.changeByDelta)
         self.fontStrokeLabel.btn_released.connect(lambda : self.on_param_changed('stroke_width', self.strokeWidthBox.value()))
         
-        self.strokeColorPicker = ColorPickerLabel(self)
+        self.strokeColorPicker = ColorPickerLabel(self, param_name='srgb')
         self.strokeColorPicker.setToolTip(self.tr("Change stroke color"))
         self.strokeColorPicker.changingColor.connect(self.changingColor)
-        self.strokeColorPicker.colorChanged.connect(self.onStrokeColorChanged)
-        self.strokeColorPicker.setObjectName("StrokeColorPicker")
-
-        self.strokeWidthBox = SizeComboBox([0, 10], 'stroke_width', self)
-        self.strokeWidthBox.addItems(["0.1"])
-        self.strokeWidthBox.setToolTip(self.tr("Change stroke width"))
-        self.strokeWidthBox.param_changed.connect(self.on_param_changed)
+        self.strokeColorPicker.colorChanged.connect(self.onColorLabelChanged)
 
         stroke_hlayout = QHBoxLayout()
         stroke_hlayout.addWidget(self.fontStrokeLabel)
@@ -374,16 +318,16 @@ class FontFormatPanel(Widget):
         stroke_hlayout.addWidget(self.strokeColorPicker)
         stroke_hlayout.setSpacing(shared.WIDGET_SPACING_CLOSE)
 
-        self.letterSpacingLabel = SizeControlLabel(self, direction=0)
-        self.letterSpacingLabel.setObjectName("letterSpacingLabel")
-        self.letterSpacingLabel.size_ctrl_changed.connect(self.onLetterSpacingCtrlChanged)
-        self.letterSpacingLabel.btn_released.connect(lambda : self.on_param_changed('letter_spacing', self.letterSpacingBox.value()))
-
         self.letterSpacingBox = SizeComboBox([0, 10], "letter_spacing", self)
         self.letterSpacingBox.addItems(["0.0"])
         self.letterSpacingBox.setToolTip(self.tr("Change letter spacing"))
         self.letterSpacingBox.setMinimumWidth(int(self.letterSpacingBox.height() * 2.5))
         self.letterSpacingBox.param_changed.connect(self.on_param_changed)
+
+        self.letterSpacingLabel = SizeControlLabel(self, direction=0, transparent_bg=False)
+        self.letterSpacingLabel.setObjectName("letterSpacingLabel")
+        self.letterSpacingLabel.size_ctrl_changed.connect(self.letterSpacingBox.changeByDelta)
+        self.letterSpacingLabel.btn_released.connect(lambda : self.on_param_changed('letter_spacing', self.letterSpacingBox.value()))
 
         lettersp_hlayout = QHBoxLayout()
         lettersp_hlayout.addWidget(self.letterSpacingLabel)
@@ -399,41 +343,30 @@ class FontFormatPanel(Widget):
         self.textstyle_panel.active_text_style_label_changed.connect(self.on_active_textstyle_label_changed)
         self.textstyle_panel.active_stylename_edited.connect(self.on_active_stylename_edited)
 
-        # self.texteffect_panel = TextEffectPanel(
-        #     self.tr("Text Effect"),
-        #     config_name='show_text_effect_panel',
-        #     config_expand_name='expand_teffect_panel',
-        # )
         self.textadvancedfmt_panel = TextAdvancedFormatPanel(
             self.tr('Advanced Text Format'),
             config_name='text_advanced_format_panel',
-            config_expand_name='expand_tadvanced_panel'
+            config_expand_name='expand_tadvanced_panel',
+            on_format_changed=self.on_param_changed
         )
-        self.textadvancedfmt_panel.param_changed.connect(self.on_param_changed)
-
-        self.shadowBtn = ClickableLabel(self.tr("Shadow"), self)
-        self.shadowBtn.clicked.connect(self.on_shadow_btn_clicked)
-        self.textadvancedfmt_panel.vlayout.addWidget(self.shadowBtn)
-        self.gradientBtn = ClickableLabel(self.tr("Gradient"), self)
-        self.gradientBtn.clicked.connect(self.on_gradient_btn_clicked)
-        self.textadvancedfmt_panel.vlayout.addWidget(self.gradientBtn)
+        color_label = self.textadvancedfmt_panel.shadow_group.color_label
+        color_label.changingColor.connect(self.changingColor)
+        color_label.colorChanged.connect(self.onColorLabelChanged)
+        color_label = self.textadvancedfmt_panel.gradient_group.start_picker
+        color_label.changingColor.connect(self.changingColor)
+        color_label.colorChanged.connect(self.onColorLabelChanged)
+        color_label = self.textadvancedfmt_panel.gradient_group.end_picker
+        color_label.changingColor.connect(self.changingColor)
+        color_label.colorChanged.connect(self.onColorLabelChanged)
         
         self.foldTextBtn = CheckableLabel(self.tr("Unfold"), self.tr("Fold"), False)
         self.sourceBtn = TextCheckerLabel(self.tr("Source"))
         self.transBtn = TextCheckerLabel(self.tr("Translation"))
-        
-        self.effect_panel = TextEffectPanelDeprecated(update_text_style_label=self.update_text_style_label)
-        self.effect_panel.hide()
-        
-        self.gradient_panel = GradientPreviewPanel(update_text_style_label=self.update_text_style_label)
-        self.gradient_panel.gradient_changed.connect(self.on_gradient_changed)
-        self.gradient_panel.hide()
 
         FONTFORMAT_SPACING = 6
 
         vl0 = QVBoxLayout()
         vl0.addWidget(self.textstyle_panel.view_widget)
-        # vl0.addWidget(self.texteffect_panel.view_widget)
         vl0.addWidget(self.textadvancedfmt_panel.view_widget)
         vl0.setSpacing(0)
         vl0.setContentsMargins(0, 0, 0, 0)
@@ -506,27 +439,12 @@ class FontFormatPanel(Widget):
     def changingColor(self):
         self.focusOnColorDialog = True
 
-    def onColorChanged(self, is_valid=True):
+    def onColorLabelChanged(self, is_valid=True):
         self.focusOnColorDialog = False
         if is_valid:
-            frgb = self.colorPicker.rgb()
-            self.on_param_changed('frgb', frgb)
-
-    def onStrokeColorChanged(self, is_valid=True):
-        self.focusOnColorDialog = False
-        if is_valid:
-            srgb = self.strokeColorPicker.rgb()
-            self.on_param_changed('srgb', srgb)
-
-    def onLineSpacingEditorChanged(self):
-        if self.lineSpacingBox.hasFocus() and C.active_format == self.global_format:
-            self.global_format.line_spacing = self.lineSpacingBox.value()
-
-    def onStrokeCtrlChanged(self, delta: int):
-        self.strokeWidthBox.setValue(self.strokeWidthBox.value() + delta * 0.01)
-
-    def onLetterSpacingCtrlChanged(self, delta: int):
-        self.letterSpacingBox.setValue(self.letterSpacingBox.value() + delta * 0.01)
+            sender: ColorPickerLabel = self.sender()
+            rgb = sender.rgb()
+            self.on_param_changed(sender.param_name, rgb)
 
     def onLineSpacingCtrlChanged(self, delta: int):
         if C.active_format.line_spacing_type == LineSpacingType.Distance:
@@ -559,7 +477,6 @@ class FontFormatPanel(Widget):
         self.alignBtnGroup.setAlignment(font_format.alignment)
         
         self.familybox.blockSignals(False)
-        # self.texteffect_panel.set_active_format(font_format)
         self.textadvancedfmt_panel.set_active_format(font_format)
 
     def set_globalfmt_title(self):
@@ -622,26 +539,3 @@ class FontFormatPanel(Widget):
                 multi_size = not textblk_item.isEditing() and textblk_item.isMultiFontSize()
                 self.set_active_format(blk_fmt, multi_size)
                 self.textstyle_panel.setTitle(f'TextBlock #{textblk_item.idx}')
-
-    def on_shadow_btn_clicked(self):
-        self.effect_panel.active_fontfmt = C.active_format
-        self.effect_panel.fontfmt = copy.deepcopy(C.active_format)
-        self.effect_panel.updatePanels()
-        self.effect_panel.show()
-
-    def on_gradient_btn_clicked(self):
-        self.gradient_panel.active_fontfmt = C.active_format
-        self.gradient_panel.fontfmt = copy.deepcopy(C.active_format)
-        self.gradient_panel.updatePanels()
-        self.gradient_panel.show()
-
-    def on_gradient_changed(self):
-        """Handle gradient changes from the preview panel"""
-        start_color = self.gradient_panel.gradient_start_picker.color.getRgb()[:3]
-        end_color = self.gradient_panel.gradient_end_picker.color.getRgb()[:3]
-        
-        self.on_param_changed('gradient_enabled', self.gradient_panel.fontfmt.gradient_enabled)
-        self.on_param_changed('gradient_start_color', start_color)
-        self.on_param_changed('gradient_end_color', end_color)
-        self.on_param_changed('gradient_angle', self.gradient_panel.fontfmt.gradient_angle)
-        self.on_param_changed('gradient_size', self.gradient_panel.fontfmt.gradient_size)
