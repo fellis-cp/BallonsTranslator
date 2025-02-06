@@ -277,7 +277,7 @@ class GoogleTranslator(GoogleTransBase):
 @register_translator('google')
 class TransGoogle(BaseTranslator):
 
-    concate_text = False
+    concate_text = True
     params: Dict = {
         'delay': 0.0,
     }
