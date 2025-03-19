@@ -169,6 +169,11 @@ class YSGYoloDetector(TextDetectorBase):
                         blk = TextBlock(xyxy=xyxy, lines=np.array(lines), src_is_vertical=is_vertical)
                         blk.font_size = font_sz
                         blk._detected_font_size = font_sz
+                        if is_vertical:
+                            blk.alignment = 1
+                        else:
+                            blk.recalulate_alignment()
+
                         blk_list.append(blk)
                         
                         # cv2.imwrite('mask.jpg', mask)
