@@ -103,6 +103,11 @@ class MainWindow(mainwindow_cls):
         if shared.HEADLESS:
             self.run_batch(**exec_args)
 
+        if shared.ON_MACOS:
+            # https://bugreports.qt.io/browse/QTBUG-133215
+            self.hideSystemTitleBar()
+            self.showMaximized()
+
     def setStyleSheet(self, styleSheet: str) -> None:
         self.imgtrans_progress_msgbox.setStyleSheet(styleSheet)
         self.export_doc_thread.progress_bar.setStyleSheet(styleSheet)

@@ -800,7 +800,7 @@ class DrawingPanel(Widget):
         ballon_mask = inpaint_dict['ballon_mask']
         if not need_inpaint and pcfg.module.check_need_inpaint:
             img[np.where(ballon_mask > 0)] = bground_bgr
-            self.canvas.push_undo_command(InpaintUndoCommand(self.canvas, img, mask, inpaint_dict['inpaint_rect']))
+            self.canvas.push_undo_command(InpaintUndoCommand(self.canvas, img, mask, inpaint_dict['inpaint_rect'], merge_existing_mask=True))
             self.clearInpaintItems()
         else:
             self.runInpaint(inpaint_dict=inpaint_dict)
