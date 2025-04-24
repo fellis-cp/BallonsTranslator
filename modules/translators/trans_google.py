@@ -307,7 +307,7 @@ class TransGoogle(BaseTranslator):
         self.lang_map['Malayalam'] = 'ml'
         self.lang_map['Tamil'] = 'ta'
         self.lang_map['Hindi'] = 'hi'
-
+        self.lang_map['ind'] = "id"
         self.googletrans = GoogleTranslator()
         
     def _translate(self, src_list: List[str]) -> List[str]:
