@@ -341,7 +341,7 @@ class LLM_API_Translator(BaseTranslator):
             if self.request_count_minute >= int(
                 self.params["max requests per minute"]["value"]
             ):
-                wait_time = 62 - (current_time - self.minute_start_time)
+                wait_time = 4
                 if wait_time > 0:
                     self.logger.warning(
                         f"Reached global RPM limit. Waiting {wait_time:.2f} seconds."
