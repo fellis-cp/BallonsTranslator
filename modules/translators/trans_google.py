@@ -307,16 +307,37 @@ class TransGoogle(BaseTranslator):
         self.lang_map['Malayalam'] = 'ml'
         self.lang_map['Tamil'] = 'ta'
         self.lang_map['Hindi'] = 'hi'
-
+        self.lang_map['ind'] = "id"
         self.googletrans = GoogleTranslator()
         
     def _translate(self, src_list: List[str]) -> List[str]:
-        
         self.googletrans._source = self.lang_map[self.lang_source]
         self.googletrans._url_params['sl'] = self.lang_map[self.lang_source]
         self.googletrans._target = self.lang_map[self.lang_target]
         self.googletrans._url_params['tl'] = self.lang_map[self.lang_target]
         self.googletrans.__base_url = "https://translate.google.com/m"
-        translations = [self.googletrans.translate(t) for t in src_list]
+        
+        '''  
+        Add time delay for request translations
+        sleep(float(self.params['delay']))
+        '''  
 
+        '''
+        change the def translate function in modules/BaseTranslator if needed
+        def translate(self, src_list: List[str]) -> List[str]:
+            return [self._translate(text) for text in src_list]
+        '''
+        
+        translations = []
+        for t in src_list:
+            try:
+                translation = self.googletrans.translate(t)
+                translations.append(translation)
+            except NotValidPayload:
+                translations.append(t)  # Append the original text if translation fails
+            except Exception as e:
+                print(f"Translation error: {e}")
+                translations.append(t)  # Append the original text for any other error
+        
         return translations
+

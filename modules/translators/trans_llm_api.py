@@ -131,6 +131,7 @@ class LLM_API_Translator(BaseTranslator):
 
     def _setup_translator(self):
         self.lang_map = {
+            "Bahasa Indonesia" : "Bahasa indonesia" , 
             "简体中文": "Simplified Chinese",
             "繁體中文": "Traditional Chinese",
             "日本語": "Japanese",
