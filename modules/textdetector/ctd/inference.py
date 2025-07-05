@@ -13,7 +13,7 @@ from utils.imgproc_utils import letterbox, xyxy2yolo, get_yololabel_strings, squ
 
 from ..yolov5.yolov5_utils import non_max_suppression
 from ..db_utils import SegDetectorRepresenter
-from utils.textblock import TextBlock, group_output
+from utils.textblock import TextBlock, group_output, mit_merge_textlines
 from .textmask import refine_mask, refine_undetected_mask, REFINEMASK_INPAINT, REFINEMASK_ANNOTATION
 from pathlib import Path
 from typing import Union, List, Tuple, Callable
@@ -344,7 +344,9 @@ class TextDetector:
             lines = []
         else:
             lines = lines.astype(np.int64)
-        blk_list = group_output(blks, lines, im_w, im_h, mask)
+        blk_list = group_output([], lines, im_w, im_h, mask, canvas=img)
+        # print(lines)
+        # blk_list = mit_merge_textlines(lines, im_w, im_w)
         mask_refined = refine_mask(img, mask, blk_list, refine_mode=refine_mode)
         if keep_undetected_mask:
             mask_refined = refine_undetected_mask(img, mask, mask_refined, blk_list, refine_mode=refine_mode)
