@@ -1248,6 +1248,7 @@ class MainWindow(mainwindow_cls):
             if reply != QMessageBox.Yes:
                 return
         self.on_run_imgtrans()
+        self.auto_layout_all_pages() 
 
     def run_imgtrans_wo_textstyle_update(self):
         self._run_imgtrans_wo_textstyle_update = True
@@ -1587,3 +1588,15 @@ class MainWindow(mainwindow_cls):
         action: QAction = d['action']
         action.setChecked(False)
         setattr(pcfg, cfg_name, False)
+
+    def auto_layout_all_pages(self):
+        for page_idx in range(self.imgtrans_proj.num_pages):
+            self.imgtrans_proj.set_current_img_byidx(page_idx)
+            self.st_manager.updateSceneTextitems()
+            # Select all text blocks
+            for blkitem in self.st_manager.textblk_item_list:
+                blkitem.setSelected(True)
+            # Apply auto layout to all selected blocks
+            self.st_manager.onAutoLayoutTextblks()
+            # Optionally, save after each page
+            self.saveCurrentPage(update_scene_text=False, save_proj=True)
