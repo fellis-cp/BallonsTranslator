@@ -1248,11 +1248,11 @@ class MainWindow(mainwindow_cls):
             if reply != QMessageBox.Yes:
                 return
         self.on_run_imgtrans()
-        self.auto_layout_all_pages() 
+        
 
     def run_imgtrans_wo_textstyle_update(self):
         self._run_imgtrans_wo_textstyle_update = True
-        self.run_imgtrans()
+        self.auto_layout_all_pages() 
 
     def on_run_imgtrans(self):
         self.backup_blkstyles.clear()

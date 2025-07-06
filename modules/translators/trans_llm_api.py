@@ -131,7 +131,7 @@ class LLM_API_Translator(BaseTranslator):
 
     def _setup_translator(self):
         self.lang_map = {
-            "Bahasa Indonesia" : "Bahasa indonesia" , 
+            "bahasa indonesia" : "bahasa Indonesia",
             "简体中文": "Simplified Chinese",
             "繁體中文": "Traditional Chinese",
             "日本語": "Japanese",
@@ -376,7 +376,7 @@ class LLM_API_Translator(BaseTranslator):
             self.key_usage[key] = (0, now)
             return
         if count >= rpm:
-            wait_time = 60 - (now - start_time)
+            wait_time = 4
             self.logger.warning(
                 f"Key {key[:6]}... reached RPM limit. Waiting {wait_time:.2f} seconds."
             )
