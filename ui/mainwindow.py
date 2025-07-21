@@ -1249,11 +1249,10 @@ class MainWindow(mainwindow_cls):
             if reply != QMessageBox.Yes:
                 return
         self.on_run_imgtrans()
-        
 
     def run_imgtrans_wo_textstyle_update(self):
         self._run_imgtrans_wo_textstyle_update = True
-        self.auto_layout_all_pages() 
+        self.run_imgtrans()
 
     def on_run_imgtrans(self):
         self.backup_blkstyles.clear()
@@ -1367,6 +1366,7 @@ class MainWindow(mainwindow_cls):
             if self.imgtrans_proj.current_img in matched_pages:
                 self.canvas.clear_undostack(update_saved_step=True)
                 self.st_manager.updateSceneTextitems()
+                self.auto_layout_all_pages()
 
             if all_matched:
                 msg = self.tr('Translation imported and matched successfully.')
