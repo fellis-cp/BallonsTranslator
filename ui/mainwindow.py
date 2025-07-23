@@ -1380,7 +1380,6 @@ class MainWindow(mainwindow_cls):
             if self.imgtrans_proj.current_img in matched_pages:
                 self.canvas.clear_undostack(update_saved_step=True)
                 self.st_manager.updateSceneTextitems()
-                
 
             if all_matched:
                 msg = self.tr('Translation imported and matched successfully.')
@@ -1396,24 +1395,22 @@ class MainWindow(mainwindow_cls):
                     msg += '\n' + self.tr('Unmatched pages: ') + '\n'
                     msg += '\n'.join(match_rst['unmatched_pages'])
                 msg = msg.strip()
-<<<<<<< HEAD
-                
-                self.auto_layout_all_pages()
-=======
 
             for pagename in matched_pages:
                 for blk in self.imgtrans_proj.pages[pagename]:
                     blk.translation = self.mtSubWidget.sub_text(blk.translation)
             
->>>>>>> 5875f6c38cb22ba92b6d746a4e3bf1168985b74d
             create_info_dialog(msg)
-        
-
 
         except Exception as e:
             create_error_dialog(e, self.tr('Failed to import translation from ') + selected_file)
 
+        self.auto_layout_all_pages()
     
+   
+
+    
+
 
     def on_reveal_file(self):
         current_img_path = self.imgtrans_proj.current_img_path()
