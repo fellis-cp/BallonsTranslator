@@ -75,11 +75,6 @@ def run_action():
         merge_txt_files(files, output_file, log_text)
 
     elif mode == "split":
-        selected = file_listbox.curselection()
-        if not selected:
-            messagebox.showerror("Error", "Please select a file to split.")
-            return
-        file_to_split = file_listbox.get(selected[0])
         try:
             num_parts = int(parts_entry.get())
             if num_parts <= 0:
@@ -87,7 +82,10 @@ def run_action():
         except ValueError:
             messagebox.showerror("Error", "Please enter a valid number of parts.")
             return
-        split_txt_file(file_to_split, num_parts, output_folder, log_text)
+
+        for file_to_split in files:
+            split_txt_file(file_to_split, num_parts, output_folder, log_text)
+
 
 # ====== Clear ======
 def clear_all():
