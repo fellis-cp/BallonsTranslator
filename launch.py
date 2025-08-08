@@ -287,6 +287,16 @@ def main():
         ballontrans.setWindowIcon(QIcon(shared.ICON_PATH))
         ballontrans.show()
         ballontrans.resetStyleSheet()
+
+      # --- Launch Merger_Spliter.py in separate process ---
+    merger_script = os.path.join(os.path.dirname(__file__), "Merger_Spliter.py")
+    if os.path.exists(merger_script):
+        try:
+            subprocess.Popen([sys.executable, merger_script])
+            print(f"Started Merger_Spliter.py from {merger_script}")
+        except Exception as e:
+            print(f"Failed to launch Merger_Spliter.py: {e}")
+
     sys.exit(app.exec())
 
 def is_amd_gpu():
