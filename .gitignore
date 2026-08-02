@@ -15,6 +15,7 @@ libs
 .codex
 .agents
 
+
 tmp.py
 dummy_scripts.py
 
@@ -67,3 +68,9 @@ Ultralytics/settings.json
 # Spellcheck dictionaries
 config/custom_dictionary.txt
 data/dictionaries/
+
+# Gemini profile instances
+gemini_profile_instance_*/
+
+# Deepl profile instances
+deepl_profile_instance_*/
