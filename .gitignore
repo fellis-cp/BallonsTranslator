@@ -69,8 +69,3 @@ Ultralytics/settings.json
 config/custom_dictionary.txt
 data/dictionaries/
 
-# Gemini profile instances
-gemini_profile_instance_*/
-
-# Deepl profile instances
-deepl_profile_instance_*/
