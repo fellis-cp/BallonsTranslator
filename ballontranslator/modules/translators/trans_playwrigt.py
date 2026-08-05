@@ -192,16 +192,15 @@ def _enhanced_local_repair(raw_json: str) -> Optional[dict]:
     fixed = re.sub(r',\s*([}\]])', r'\1', raw_json)
     fixed = re.sub(r',\s*\{\s*["\']?id["\']?\s*:\s*\d+.*$', '', fixed)
     fixed = fixed.rstrip(',').rstrip()
-    if not fixed.endswith(']}') and not fixed.endswith('}'):
+    if not fixed.endswith(']}'):
         if fixed.startswith('['):
             if not fixed.endswith(']'):
                 fixed += ']'
         else:
-            if not fixed.endswith(']}'):
-                if not fixed.endswith(']'):
-                    fixed += ']}'
-                else:
-                    fixed += '}'
+            if not fixed.endswith(']'):
+                fixed += ']'
+            if not fixed.endswith('}'):
+                fixed += '}'
     try:
         data = json.loads(fixed)
         res = _extract_translations_from_data(data)
@@ -391,19 +390,43 @@ def _build_results(task_src_list: List[str], translations: List[dict]) -> List[s
     return results
 
 
+def _calculate_timeout(src_list: List[str], base_timeout: int = 120) -> int:
+    """
+    Calculate dynamic timeout (in seconds) based on total input character length.
+    Ensures long texts have enough time for LLM generation.
+
+    >>> _calculate_timeout(["Hello"], base_timeout=120)
+    120
+    >>> _calculate_timeout(["A" * 1000], base_timeout=120)
+    200
+    """
+    total_chars = sum(len(s) for s in src_list)
+    additional = max(0, (total_chars - 200) // 10)
+    return max(base_timeout, base_timeout + additional)
+
+
 # --- Data Carrier ---
 
 class TranslationTask:
     """
     Data carrier holding input source strings and output translated results.
     """
-    def __init__(self, src_list: List[str], target_lang: str, custom_prompt: str, source_lang: str, needs_refresh: bool = False):
+    def __init__(
+        self,
+        src_list: List[str],
+        target_lang: str,
+        custom_prompt: str,
+        source_lang: str,
+        needs_refresh: bool = False,
+        timeout: int = 120
+    ):
         self.src_list = src_list
         self.target_lang = target_lang
         self.custom_prompt = custom_prompt
         self.source_lang = source_lang
+        self.needs_refresh = needs_refresh
+        self.timeout = timeout
         self.result: Optional[List[str]] = None
-        self.needs_refresh = needs_refresh 
         self.done_event = threading.Event()
 
 # --- Gemini Browser Worker ---
@@ -529,8 +552,9 @@ class GeminiBrowserWorker(threading.Thread):
             start_wait = time.time()
             last_length = 0
             last_growth_time = time.time()
-            max_poll_time = 10
+            max_poll_time = max(task.timeout, _calculate_timeout(task.src_list, base_timeout=task.timeout))
             stable_threshold_s = 1.0
+            no_growth_timeout = 30.0
             
             logger.info(f"Instance {self.instance_id}: Waiting for response (Max {max_poll_time}s)...")
 
@@ -559,6 +583,10 @@ class GeminiBrowserWorker(threading.Thread):
                     continue
 
                 wall_stable = time.time() - last_growth_time
+                if current_length > 0 and wall_stable > no_growth_timeout and batch_token not in current_text:
+                    logger.warning(f"Instance {self.instance_id}: Response stalled for {wall_stable:.1f}s without batch token.")
+                    break
+
                 if wall_stable < stable_threshold_s or current_length == 0:
                     continue
 
@@ -576,7 +604,7 @@ class GeminiBrowserWorker(threading.Thread):
                     logger.info(f"Instance {self.instance_id}: Dispatching to JsonRepairWorker...")
                     repair_task = RepairTask(raw_json, expected_count=len(input_elements), batch_token=batch_token)
                     self.repair_worker.task_queue.put(repair_task)
-                    if repair_task.done_event.wait(timeout=5) and repair_task.result:
+                    if repair_task.done_event.wait(timeout=10) and repair_task.result:
                         data = repair_task.result
 
                 if data is None:
@@ -598,7 +626,7 @@ class GeminiBrowserWorker(threading.Thread):
                         page.keyboard.press("Enter")
 
                         repair_start = time.time()
-                        while (time.time() - repair_start) < 6:
+                        while (time.time() - repair_start) < 30:
                             time.sleep(0.3)
                             resp_els = page.query_selector_all(".markdown, .message-content")
                             if not resp_els: continue
@@ -791,7 +819,11 @@ class DeepSeekBrowserWorker(threading.Thread):
                 start_wait = time.time()
                 last_length = 0
                 stable_checks = 0
-                while (time.time() - start_wait) < 10:
+                last_growth_time = time.time()
+                max_poll_time = max(task.timeout, _calculate_timeout(task.src_list, base_timeout=task.timeout))
+                no_growth_timeout = 30.0
+
+                while (time.time() - start_wait) < max_poll_time:
                     time.sleep(0.2)
                     
                     # Only check for rate-limit text when the response has stalled
@@ -851,8 +883,14 @@ class DeepSeekBrowserWorker(threading.Thread):
 
                     if len(current_text) > last_length:
                         last_length = len(current_text)
+                        last_growth_time = time.time()
                         stable_checks = 0
                         continue
+
+                    wall_stable = time.time() - last_growth_time
+                    if current_text and wall_stable > no_growth_timeout and batch_token not in current_text:
+                        logger.warning(f"DeepSeek Instance {self.instance_id}: Response stalled for {wall_stable:.1f}s.")
+                        break
                     
                     if current_text:
                         stable_checks += 1
@@ -1030,7 +1068,8 @@ class DeepLBrowserWorker(threading.Thread):
             start_wait = time.time()
             last_length = 0
             stable_checks = 0
-            while (time.time() - start_wait) < 10:
+            max_poll_time = max(task.timeout, _calculate_timeout(task.src_list, base_timeout=task.timeout))
+            while (time.time() - start_wait) < max_poll_time:
                 time.sleep(0.2)
                 try:
                     target_el = page.query_selector(output_sel)
@@ -1062,7 +1101,7 @@ class DeepLBrowserWorker(threading.Thread):
                         return results
 
             # Timeout — return None so the caller knows translation failed
-            logger.warning(f"DeepL Instance {self.instance_id}: [TIMEOUT] No translation in 10s")
+            logger.warning(f"DeepL Instance {self.instance_id}: [TIMEOUT] No translation in {max_poll_time}s")
             return None
         except Exception as e:
             logger.error(f"DeepL Translation Error: {e}")
@@ -1094,6 +1133,11 @@ class TransGemini(BaseTranslator):
         "prompt": {
             "value": "",
             "description": "Custom prompt to guide LLM translation (Gemini & DeepSeek)."
+        },
+        "timeout": {
+            "value": 120,
+            "display_name": "Timeout (seconds)",
+            "description": "Maximum base timeout in seconds for translation batch to complete."
         }
     }
 
@@ -1219,7 +1263,17 @@ class TransGemini(BaseTranslator):
             custom_prompt = custom_prompt.get("value", "")
         custom_prompt = (custom_prompt or "").strip()
 
-        logger.info(f"Instance {self.instance_id} ({self.provider}): Starting batch translation ({len(src_list)} blocks)...")
+        configured_timeout = self.get_param_value("timeout")
+        if isinstance(configured_timeout, dict):
+            configured_timeout = configured_timeout.get("value", 120)
+        try:
+            configured_timeout = int(configured_timeout)
+        except (ValueError, TypeError):
+            configured_timeout = 120
+
+        calc_timeout = _calculate_timeout(src_list, base_timeout=configured_timeout)
+
+        logger.info(f"Instance {self.instance_id} ({self.provider}): Starting batch translation ({len(src_list)} blocks, max timeout {calc_timeout}s)...")
 
         # Retry loop (max 2 attempts) instead of recursion to keep
         # the call stack shallow and the timeout predictable.
@@ -1229,10 +1283,11 @@ class TransGemini(BaseTranslator):
             if needs_refresh:
                 logger.warning(f"Instance {self.instance_id} ({self.provider}): [TIMEOUT/FAIL] Retrying ({attempt}/{max_retries})...")
 
-            task = TranslationTask(src_list, target, custom_prompt, source, needs_refresh=needs_refresh)
+            task = TranslationTask(src_list, target, custom_prompt, source, needs_refresh=needs_refresh, timeout=calc_timeout)
             self.worker.task_queue.put(task)
             
-            if task.done_event.wait(timeout=60) and task.result:
+            wait_timeout = calc_timeout + 30
+            if task.done_event.wait(timeout=wait_timeout) and task.result:
                 return task.result
 
         logger.error(f"Instance {self.instance_id} ({self.provider}): [FAILED] Returning original text.")
