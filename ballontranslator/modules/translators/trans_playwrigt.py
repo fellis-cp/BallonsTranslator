@@ -410,6 +410,10 @@ def _calculate_timeout(src_list: List[str], base_timeout: int = 120) -> int:
 class TranslationTask:
     """
     Data carrier holding input source strings and output translated results.
+
+    >>> task = TranslationTask(["Hello"], "Indonesian", "", "English", mode="Sequential")
+    >>> task.mode
+    'Sequential'
     """
     def __init__(
         self,
@@ -418,7 +422,8 @@ class TranslationTask:
         custom_prompt: str,
         source_lang: str,
         needs_refresh: bool = False,
-        timeout: int = 120
+        timeout: int = 120,
+        mode: str = "Batch"
     ):
         self.src_list = src_list
         self.target_lang = target_lang
@@ -426,6 +431,7 @@ class TranslationTask:
         self.source_lang = source_lang
         self.needs_refresh = needs_refresh
         self.timeout = timeout
+        self.mode = mode
         self.result: Optional[List[str]] = None
         self.done_event = threading.Event()
 
@@ -511,6 +517,11 @@ class GeminiBrowserWorker(threading.Thread):
                 logger.debug(f"Instance {self.instance_id}: Reload also failed: {reload_err}")
 
     def _do_translate(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if task.mode == "Sequential":
+            return self._do_translate_sequential(page, task)
+        return self._do_translate_batch(page, task)
+
+    def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
         input_sel = "div[contenteditable='true']"
         try:
             page.wait_for_selector(input_sel, timeout=15000)
@@ -534,6 +545,9 @@ class GeminiBrowserWorker(threading.Thread):
                 f'SCHEMA: {{"batch_id": "{batch_token}", "translations": [{{"id": number, "translation": "string"}}]}}',
                 f"INPUT:\n{input_json_str}"
             ])
+            if task.custom_prompt:
+                prompt_parts.insert(2, f"INSTRUCTION: {task.custom_prompt}")
+
             full_prompt = "\n".join(prompt_parts)
 
             logger.info("-" * 50)
@@ -652,6 +666,116 @@ class GeminiBrowserWorker(threading.Thread):
             logger.error(f"Instance {self.instance_id}: [LOGIC_ERROR] {e}")
             return None
 
+    def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
+        input_sel = "div[contenteditable='true']"
+        try:
+            page.wait_for_selector(input_sel, timeout=15000)
+
+            input_elements = []
+            current_global_id = 1
+            for text in task.src_list:
+                parts = text.split('##')
+                for part in parts:
+                    input_elements.append({"id": current_global_id, "text": part.strip()})
+                    current_global_id += 1
+
+            logger.info("-" * 50)
+            logger.info(f"Instance {self.instance_id}: [SENDING_DATA_SEQUENTIAL] Total items: {len(input_elements)}")
+            logger.info("-" * 50)
+
+            collected_translations: List[dict] = []
+
+            for elem in input_elements:
+                item_id = elem["id"]
+                item_text = elem["text"]
+
+                if not item_text:
+                    collected_translations.append({"id": item_id, "translation": ""})
+                    continue
+
+                item_token = f"ID_{item_id}_{uuid.uuid4().hex[:4]}"
+                item_json = json.dumps([elem], ensure_ascii=False)
+
+                prompt_parts = [
+                    f"IDENTIFIER: {item_token}",
+                    f"TASK: Translate from {task.source_lang} to {task.target_lang}.",
+                    "FORMAT: Respond ONLY with a valid JSON object. No prose.",
+                    f'SCHEMA: {{"batch_id": "{item_token}", "translations": [{{"id": {item_id}, "translation": "string"}}]}}',
+                    f"INPUT:\n{item_json}"
+                ]
+                if task.custom_prompt:
+                    prompt_parts.insert(2, f"INSTRUCTION: {task.custom_prompt}")
+
+                full_prompt = "\n".join(prompt_parts)
+
+                logger.info(f"Instance {self.instance_id}: [ITEM {item_id}/{len(input_elements)}] Token: {item_token}")
+
+                page.click(input_sel)
+                time.sleep(0.3)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.insert_text(full_prompt)
+                time.sleep(0.5)
+                page.keyboard.press("Enter")
+
+                start_wait = time.time()
+                last_length = 0
+                last_growth_time = time.time()
+                item_timeout = min(45, task.timeout)
+                item_trans = None
+
+                while (time.time() - start_wait) < item_timeout:
+                    time.sleep(0.3)
+                    responses = page.query_selector_all(".markdown, .message-content")
+                    if not responses:
+                        continue
+
+                    current_text = responses[-1].inner_text()
+                    current_length = len(current_text)
+
+                    if item_token in current_text:
+                        raw_json = _extract_json_block(current_text)
+                        if raw_json:
+                            data = _parse_or_repair_json(raw_json, self.instance_id)
+                            if data and "translations" in data and len(data["translations"]) > 0:
+                                item_trans = data["translations"][0].get("translation", "")
+                                break
+
+                    if current_length > last_length:
+                        last_length = current_length
+                        last_growth_time = time.time()
+                        continue
+
+                    wall_stable = time.time() - last_growth_time
+                    if current_length > 0 and wall_stable > 15.0 and item_token not in current_text:
+                        logger.warning(f"Instance {self.instance_id}: Response stalled for item {item_id}.")
+                        break
+
+                    if wall_stable < 0.8 or current_length == 0:
+                        continue
+
+                    if item_token not in current_text:
+                        continue
+
+                    raw_json = _extract_json_block(current_text)
+                    if raw_json:
+                        data = _parse_or_repair_json(raw_json, self.instance_id)
+                        if data and "translations" in data and len(data["translations"]) > 0:
+                            item_trans = data["translations"][0].get("translation", "")
+                            break
+
+                if item_trans is not None:
+                    collected_translations.append({"id": item_id, "translation": item_trans})
+                else:
+                    logger.warning(f"Instance {self.instance_id}: Item {item_id} failed or timed out. Preserving original.")
+                    collected_translations.append({"id": item_id, "translation": item_text})
+
+            return _build_results(task.src_list, collected_translations)
+
+        except Exception as e:
+            logger.error(f"Instance {self.instance_id}: [LOGIC_ERROR_SEQUENTIAL] {e}")
+            return None
+
 # --- DeepSeek Browser Worker ---
 
 class DeepSeekBrowserWorker(threading.Thread):
@@ -764,6 +888,11 @@ class DeepSeekBrowserWorker(threading.Thread):
         return False
 
     def _do_translate(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if task.mode == "Sequential":
+            return self._do_translate_sequential(page, task)
+        return self._do_translate_batch(page, task)
+
+    def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
         INPUT_SEL = "textarea[placeholder='Message DeepSeek']"
         SELECTORS = ".ds-markdown, .ds-assistant-message-main-content, .markdown, .message-content"
 
@@ -807,6 +936,9 @@ class DeepSeekBrowserWorker(threading.Thread):
                     f'SCHEMA: {{"batch_id": "{batch_token}", "translations": [{{"id": number, "translation": "string"}}]}}',
                     f"INPUT:\n{input_json_str}"
                 ])
+                if task.custom_prompt:
+                    prompt_parts.insert(2, f"INSTRUCTION: {task.custom_prompt}")
+
                 full_prompt = "\n".join(prompt_parts)
 
                 page.click(INPUT_SEL)
@@ -827,16 +959,13 @@ class DeepSeekBrowserWorker(threading.Thread):
                     time.sleep(0.2)
                     
                     # Only check for rate-limit text when the response has stalled
-                    # (avoids expensive full-body serialization every 200ms).
                     if stable_checks >= 2:
                         try:
-                            # Use a targeted selector for toast/error elements first
                             error_els = page.query_selector_all(".ds-toast, .ant-message, [class*='error'], [class*='toast']")
                             error_text = " ".join(
                                 el.inner_text().lower() for el in error_els
                             ) if error_els else ""
                             if not error_text:
-                                # Fallback: scan body only when stalled, not every cycle
                                 error_text = page.inner_text("body").lower()
                             if "messages too frequent" in error_text or "try again later" in error_text or "发送消息过于频繁" in error_text:
                                 logger.warning("DeepSeek: Rate limit / frequency error detected in page text.")
@@ -846,7 +975,7 @@ class DeepSeekBrowserWorker(threading.Thread):
                                     time.sleep(30)
                                     self._start_new_chat(page)
                                     self.translate_count = 0
-                                    break  # Re-enter the outer while True to retry
+                                    break
                                 else:
                                     logger.error("DeepSeek: Exceeded rate limit retry limit.")
                                     return None
@@ -872,7 +1001,6 @@ class DeepSeekBrowserWorker(threading.Thread):
                     except Exception:
                         continue
                     
-                    # Fast path: if complete valid JSON is detected with the batch token, return immediately
                     if batch_token in current_text:
                         raw_json = _extract_json_block(current_text)
                         if raw_json:
@@ -895,14 +1023,13 @@ class DeepSeekBrowserWorker(threading.Thread):
                     if current_text:
                         stable_checks += 1
                         if stable_checks >= 2:
-                            
                             if self._is_refusal(current_text):
                                 logger.warning(f"DeepSeek: Refusal detected: \"{current_text[:80]}...\"")
                                 if not is_retry:
                                     self._start_new_chat(page)
                                     self.translate_count = 0
                                     is_retry = True
-                                    break  # Re-enter the outer while True to retry
+                                    break
                                 else:
                                     return None
 
@@ -922,16 +1049,140 @@ class DeepSeekBrowserWorker(threading.Thread):
                                 translations = data.get("translations", [])
                                 return _build_results(task.src_list, translations)
                 else:
-                    # Inner while loop finished without break → timeout
                     return None
 
-                # If we reach here, we broke out of the inner loop for a retry.
-                # The outer `while True` re-enters to resubmit the prompt.
                 continue
 
             except Exception as e:
                 logger.error(f"DeepSeek Translation Error: {e}")
                 return None
+
+    def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
+        INPUT_SEL = "textarea[placeholder='Message DeepSeek']"
+        SELECTORS = ".ds-markdown, .ds-assistant-message-main-content, .markdown, .message-content"
+
+        try:
+            current_url = page.url
+            if "sign_in" in current_url or "accounts.google.com" in current_url or not page.query_selector(INPUT_SEL):
+                page.wait_for_selector(INPUT_SEL, timeout=90000)
+
+            page.wait_for_selector(INPUT_SEL, timeout=15000)
+
+            input_elements = []
+            current_global_id = 1
+            for text in task.src_list:
+                parts = text.split('##')
+                for part in parts:
+                    input_elements.append({"id": current_global_id, "text": part.strip()})
+                    current_global_id += 1
+
+            collected_translations: List[dict] = []
+
+            for elem in input_elements:
+                item_id = elem["id"]
+                item_text = elem["text"]
+
+                if not item_text:
+                    collected_translations.append({"id": item_id, "translation": ""})
+                    continue
+
+                existing_responses = page.query_selector_all(SELECTORS)
+                if existing_responses:
+                    try:
+                        existing_responses[-1].evaluate("el => el.setAttribute('data-luna-old', 'true')")
+                    except Exception:
+                        pass
+
+                item_token = f"ID_{item_id}_{uuid.uuid4().hex[:4]}"
+                item_json = json.dumps([elem], ensure_ascii=False)
+
+                prompt_parts = [
+                    f"IDENTIFIER: {item_token}",
+                    f"TASK: Translate from {task.source_lang} to {task.target_lang}.",
+                    "FORMAT: Respond ONLY with a valid JSON object. No prose.",
+                    f'SCHEMA: {{"batch_id": "{item_token}", "translations": [{{"id": {item_id}, "translation": "string"}}]}}',
+                    f"INPUT:\n{item_json}"
+                ]
+                if task.custom_prompt:
+                    prompt_parts.insert(2, f"INSTRUCTION: {task.custom_prompt}")
+
+                full_prompt = "\n".join(prompt_parts)
+
+                page.click(INPUT_SEL)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.insert_text(full_prompt)
+                time.sleep(0.1)
+                page.keyboard.press("Enter")
+
+                start_wait = time.time()
+                last_length = 0
+                stable_checks = 0
+                last_growth_time = time.time()
+                item_timeout = min(45, task.timeout)
+                item_trans = None
+
+                while (time.time() - start_wait) < item_timeout:
+                    time.sleep(0.2)
+                    try:
+                        responses = page.query_selector_all(SELECTORS)
+                    except Exception:
+                        continue
+
+                    if not responses:
+                        continue
+                    last_response = responses[-1]
+                    try:
+                        if last_response.evaluate("el => el.hasAttribute('data-luna-old')"):
+                            continue
+                    except Exception:
+                        continue
+
+                    try:
+                        current_text = last_response.inner_text().strip()
+                    except Exception:
+                        continue
+
+                    if item_token in current_text:
+                        raw_json = _extract_json_block(current_text)
+                        if raw_json:
+                            data = _parse_or_repair_json(raw_json, self.instance_id)
+                            if data and "translations" in data and len(data["translations"]) > 0:
+                                item_trans = data["translations"][0].get("translation", "")
+                                break
+
+                    if len(current_text) > last_length:
+                        last_length = len(current_text)
+                        last_growth_time = time.time()
+                        stable_checks = 0
+                        continue
+
+                    wall_stable = time.time() - last_growth_time
+                    if current_text and wall_stable > 15.0 and item_token not in current_text:
+                        break
+
+                    if current_text:
+                        stable_checks += 1
+                        if stable_checks >= 2:
+                            if self._is_refusal(current_text):
+                                break
+                            raw_json = _extract_json_block(current_text)
+                            if raw_json:
+                                data = _parse_or_repair_json(raw_json, self.instance_id)
+                                if data and "translations" in data and len(data["translations"]) > 0:
+                                    item_trans = data["translations"][0].get("translation", "")
+                                    break
+
+                if item_trans is not None:
+                    collected_translations.append({"id": item_id, "translation": item_trans})
+                else:
+                    collected_translations.append({"id": item_id, "translation": item_text})
+
+            return _build_results(task.src_list, collected_translations)
+
+        except Exception as e:
+            logger.error(f"DeepSeek Sequential Translation Error: {e}")
+            return None
 
 # --- DeepL Browser Worker ---
 
@@ -1038,6 +1289,11 @@ class DeepLBrowserWorker(threading.Thread):
                 logger.debug(f"DeepL Instance {self.instance_id}: Reload also failed: {reload_err}")
 
     def _do_translate(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if task.mode == "Sequential":
+            return self._do_translate_sequential(page, task)
+        return self._do_translate_batch(page, task)
+
+    def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
         input_sel = 'd-textarea[data-testid="translator-source-input"]'
         output_sel = 'd-textarea[data-testid="translator-target-input"]'
         try:
@@ -1107,6 +1363,72 @@ class DeepLBrowserWorker(threading.Thread):
             logger.error(f"DeepL Translation Error: {e}")
             return None
 
+    def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
+        input_sel = 'd-textarea[data-testid="translator-source-input"]'
+        output_sel = 'd-textarea[data-testid="translator-target-input"]'
+        try:
+            page.wait_for_selector(input_sel, timeout=15000)
+
+            lang_code = self._map_lang_code(task.target_lang)
+            if f"#auto/{lang_code}" not in page.url:
+                self._safe_goto(page, f"https://www.deepl.com/translator#auto/{lang_code}", wait_extra=True)
+
+            results = []
+            for src in task.src_list:
+                if not src.strip():
+                    results.append(src)
+                    continue
+
+                page.click(input_sel)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+
+                start_clear = time.time()
+                while time.time() - start_clear < 2:
+                    try:
+                        target_text = page.query_selector(output_sel).inner_text().strip()
+                        if not target_text: break
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+
+                page.keyboard.insert_text(src)
+
+                start_wait = time.time()
+                last_length = 0
+                stable_checks = 0
+                item_translated = None
+
+                while (time.time() - start_wait) < 30:
+                    time.sleep(0.2)
+                    try:
+                        target_el = page.query_selector(output_sel)
+                        if not target_el: continue
+                        current_text = target_el.inner_text().strip()
+                    except Exception:
+                        continue
+
+                    if len(current_text) > last_length:
+                        last_length = len(current_text)
+                        stable_checks = 0
+                        continue
+
+                    if current_text and current_text != src:
+                        stable_checks += 1
+                        if stable_checks >= 2:
+                            item_translated = current_text
+                            break
+
+                if item_translated:
+                    results.append(item_translated)
+                else:
+                    results.append(src)
+
+            return results
+        except Exception as e:
+            logger.error(f"DeepL Sequential Translation Error: {e}")
+            return None
+
 # --- Translator Registration ---
 
 @register_translator("Gemini Playwright")
@@ -1129,6 +1451,12 @@ class TransGemini(BaseTranslator):
             "options": ["Gemini", "DeepSeek", "DeepL"],
             "value": "Gemini",
             "description": "Select the browser automation provider.",
+        },
+        "mode": {
+            "type": "selector",
+            "options": ["Batch", "Sequential"],
+            "value": "Batch",
+            "description": "Translation mode: Batch (all text blocks in one prompt) or Sequential (item-by-item per ID).",
         },
         "prompt": {
             "value": "",
@@ -1153,6 +1481,13 @@ class TransGemini(BaseTranslator):
         if isinstance(prov, dict):
             return prov.get("value", "Gemini")
         return prov or "Gemini"
+
+    @property
+    def mode(self) -> str:
+        m = self.get_param_value("mode")
+        if isinstance(m, dict):
+            return m.get("value", "Batch")
+        return m or "Batch"
 
     @property
     def profile_path(self) -> str:
@@ -1273,7 +1608,8 @@ class TransGemini(BaseTranslator):
 
         calc_timeout = _calculate_timeout(src_list, base_timeout=configured_timeout)
 
-        logger.info(f"Instance {self.instance_id} ({self.provider}): Starting batch translation ({len(src_list)} blocks, max timeout {calc_timeout}s)...")
+        mode = self.mode
+        logger.info(f"Instance {self.instance_id} ({self.provider}): Starting {mode.lower()} translation ({len(src_list)} blocks, max timeout {calc_timeout}s)...")
 
         # Retry loop (max 2 attempts) instead of recursion to keep
         # the call stack shallow and the timeout predictable.
@@ -1283,7 +1619,7 @@ class TransGemini(BaseTranslator):
             if needs_refresh:
                 logger.warning(f"Instance {self.instance_id} ({self.provider}): [TIMEOUT/FAIL] Retrying ({attempt}/{max_retries})...")
 
-            task = TranslationTask(src_list, target, custom_prompt, source, needs_refresh=needs_refresh, timeout=calc_timeout)
+            task = TranslationTask(src_list, target, custom_prompt, source, needs_refresh=needs_refresh, timeout=calc_timeout, mode=mode)
             self.worker.task_queue.put(task)
             
             wait_timeout = calc_timeout + 30
