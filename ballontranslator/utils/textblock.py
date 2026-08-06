@@ -455,9 +455,10 @@ class TextBlock:
         """Check if the text block lacks a distinct translation.
 
         A text block is considered untranslated if it has non-empty source text
-        and its translation is either empty or identical to the source text.
+        and its translation is either empty or equivalent to the source text
+        (ignoring newlines, spaces, and formatting variations).
 
-        >>> blk1 = TextBlock(text=['ははああ'], translation='')
+        >>> blk1 = TextBlock(text=['いいのかい? 源五郎さん･･･'], translation='いいのかい?\\n源五郎さん･･･')
         >>> blk1.is_untranslated()
         True
         >>> blk2 = TextBlock(text=['ははああ'], translation='ははああ')
@@ -471,7 +472,14 @@ class TextBlock:
         if not orig:
             return False
         trans = (self.translation or "").strip()
-        return not trans or trans == orig
+        if not trans:
+            return True
+
+        from .text_processing import FULL2HALF
+        norm_orig = re.sub(r'\s+', '', orig).translate(FULL2HALF).lower()
+        norm_trans = re.sub(r'\s+', '', trans).translate(FULL2HALF).lower()
+
+        return norm_orig == norm_trans
 
 
     def set_font_colors(self, fg_colors = None, bg_colors = None):

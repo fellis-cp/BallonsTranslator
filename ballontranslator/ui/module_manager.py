@@ -454,6 +454,7 @@ class OCRThread(ModuleThread):
 class TranslateThread(ModuleThread):
 
     progress_changed = Signal(int)
+    page_trans_finished = Signal(int)
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__('translator', TRANSLATORS, *args, **kwargs)
@@ -674,6 +675,10 @@ class TranslateThread(ModuleThread):
                 # return
             self.blockSignals(False)
             self.finished_counter += 1
+            if self.imgtrans_proj is not None:
+                page_idx = self.imgtrans_proj.pagename2idx(page_key)
+                if page_idx >= 0:
+                    self.page_trans_finished.emit(page_idx)
             self.progress_changed.emit(self.finished_counter)
 
             if not self.pipeline_finished() and delay > 0:
@@ -769,6 +774,10 @@ class TranslateThread(ModuleThread):
                 create_error_dialog(e, msg, 'TranslationFailed')
             self.blockSignals(False)
             self.finished_counter += 1
+            if self.imgtrans_proj is not None:
+                page_idx = self.imgtrans_proj.pagename2idx(page_key)
+                if page_idx >= 0:
+                    self.page_trans_finished.emit(page_idx)
             self.progress_changed.emit(self.finished_counter)
 
             if not self.pipeline_finished() and delay > 0:
@@ -811,6 +820,8 @@ class ImgtransThread(QThread):
         self.stop_event = threading.Event()
         self._pipeline_stop_emitted = False
         self.pages_to_process = None
+        self.parallel_trans = False
+        self.num_pages = 0
         register_global_callback('user_request_stop', self.isStopRequested)
 
     def on_module_thread_stopped(self):
@@ -1371,10 +1382,10 @@ class ImgtransThread(QThread):
         if cfg_module.enable_inpaint:
             ref_counter = min(ref_counter, self.inpaint_counter)
         if cfg_module.enable_translate:
-            if self.parallel_trans:
+            if getattr(self, 'parallel_trans', False):
                 ref_counter = min(ref_counter, self.translate_thread.finished_counter)
             else:
-                ref_counter = min(ref_counter, self.translate_counter)
+                ref_counter = min(ref_counter, getattr(self, 'translate_counter', 0))
 
         process_idx = ref_counter - 1
         # 将处理索引转换为实际页面索引
@@ -1408,6 +1419,7 @@ class ModuleManager(QObject):
     run_canvas_inpaint = False
     is_waiting_th = False
     block_set_inpainter = False
+    last_finished_index = -1
 
     def __init__(self, 
                  imgtrans_proj: ProjImgTrans,
@@ -1443,6 +1455,7 @@ class ModuleManager(QObject):
         
         self.translate_thread = TranslateThread()
         self.translate_thread.progress_changed.connect(self.on_update_translate_progress)
+        self.translate_thread.page_trans_finished.connect(self.page_trans_finished)
 
         self.inpaint_thread = InpaintThread()
         self.inpaint_thread.finish_inpaint.connect(self.on_finish_inpaint)
@@ -2159,12 +2172,13 @@ class ModuleManager(QObject):
     def _startBatchUntranslatedPipeline(self, imgtrans_proj: ProjImgTrans):
         if self.prepare_msgbox is not None and self.prepare_msgbox.isVisible():
             self.prepare_msgbox.done(0)
+        self.last_finished_index = -1
         self.progress_msgbox.hide_all_bars()
         self.progress_msgbox.translate_bar.show()
         self.progress_msgbox.zero_progress()
         self.progress_msgbox.show_fitted()
-        self.stop_event.clear()
-        self.translate_thread.runBatchUntranslatedPipeline(imgtrans_proj, self.stop_event)
+        self.imgtrans_thread.stop_event.clear()
+        self.translate_thread.runBatchUntranslatedPipeline(imgtrans_proj, self.imgtrans_thread.stop_event)
 
     def runBlktransPipeline(
         self,
@@ -2237,12 +2251,17 @@ class ModuleManager(QObject):
         ri = self.imgtrans_thread.recent_finished_index(progress)
         if stage in shared.pbar:
             shared.pbar[stage].update(1)
-        progress = int(progress / self.imgtrans_thread.num_pages * 100)
-        update_progress(progress)
-        if ri != self.last_finished_index:
+        total_pages = getattr(self.translate_thread, 'num_process_pages', 0) if (stage == 'translate' and self.translate_thread.isRunning() and getattr(self.translate_thread, 'num_process_pages', 0) > 0) else getattr(self.imgtrans_thread, 'num_pages', 0)
+        if total_pages > 0:
+            progress_pct = int(progress / total_pages * 100)
+        else:
+            progress_pct = 100
+        update_progress(progress_pct)
+        last_finished = getattr(self, 'last_finished_index', -1)
+        if ri != last_finished:
             self.last_finished_index = ri
             self.page_trans_finished.emit(ri)
-        if progress == 100:
+        if progress_pct == 100:
             self.finishImgtransPipeline()
 
     def on_update_detect_progress(self, progress: int):
@@ -2259,7 +2278,7 @@ class ModuleManager(QObject):
 
     def progress(self):
         progress = {}
-        num_pages = self.imgtrans_thread.num_pages
+        num_pages = getattr(self.imgtrans_thread, 'num_pages', 0) or 1
         if cfg_module.enable_detect:
             progress['detect'] = self.imgtrans_thread.detect_counter / num_pages
         if cfg_module.enable_ocr:

@@ -179,6 +179,18 @@ def _enhanced_local_repair(raw_json: str) -> Optional[dict]:
                 return {"translations": _normalize_translations([data])}
         return None
 
+    # Step 0: Extract JSON block if surrounded by markdown fences or LLM prose
+    extracted = _extract_json_block(raw_json)
+    if extracted and extracted != raw_json:
+        try:
+            data = json.loads(extracted)
+            res = _extract_translations_from_data(data)
+            if res:
+                return res
+        except json.JSONDecodeError:
+            pass
+        raw_json = extracted
+
     # Step 1: Direct parse attempt
     try:
         data = json.loads(raw_json)
@@ -256,8 +268,10 @@ def _parse_or_repair_json(raw_json: str, instance_id: int) -> Optional[dict]:
     if not raw_json:
         return None
 
+    json_candidate = _extract_json_block(raw_json) or raw_json
+
     try:
-        data = json.loads(raw_json)
+        data = json.loads(json_candidate)
         if isinstance(data, list):
             logger.info(f"Instance {instance_id}: [JSON_SUCCESS] (array)")
             return {"translations": _normalize_translations(data)}
@@ -273,7 +287,7 @@ def _parse_or_repair_json(raw_json: str, instance_id: int) -> Optional[dict]:
         pass
 
     logger.warning(f"Instance {instance_id}: [REPAIRING_JSON]")
-    data = _enhanced_local_repair(raw_json)
+    data = _enhanced_local_repair(json_candidate) or _enhanced_local_repair(raw_json)
     if data:
         logger.info(f"Instance {instance_id}: [REPAIR_SUCCESS]")
         return data
