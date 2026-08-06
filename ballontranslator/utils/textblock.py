@@ -451,6 +451,29 @@ class TextBlock:
 
         return text.strip()
 
+    def is_untranslated(self) -> bool:
+        """Check if the text block lacks a distinct translation.
+
+        A text block is considered untranslated if it has non-empty source text
+        and its translation is either empty or identical to the source text.
+
+        >>> blk1 = TextBlock(text=['ははああ'], translation='')
+        >>> blk1.is_untranslated()
+        True
+        >>> blk2 = TextBlock(text=['ははああ'], translation='ははああ')
+        >>> blk2.is_untranslated()
+        True
+        >>> blk3 = TextBlock(text=['ははああ'], translation='Haha')
+        >>> blk3.is_untranslated()
+        False
+        """
+        orig = self.get_text().strip()
+        if not orig:
+            return False
+        trans = (self.translation or "").strip()
+        return not trans or trans == orig
+
+
     def set_font_colors(self, fg_colors = None, bg_colors = None):
         if fg_colors is not None:
             self.fg_colors = fg_colors

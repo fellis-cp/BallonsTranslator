@@ -679,6 +679,102 @@ class TranslateThread(ModuleThread):
             if not self.pipeline_finished() and delay > 0:
                 stop_event.wait(delay)
 
+    def _translate_untranslated_page(
+        self,
+        project: ProjImgTrans,
+        page_key: str,
+    ) -> bool:
+        page = project.pages.get(page_key, [])
+        untranslated_blks = [blk for blk in page if blk.is_untranslated()]
+        if not untranslated_blks:
+            return True
+        success = True
+        if hasattr(self.translator, 'set_stop_event'):
+            self.translator.set_stop_event(self.pipeline_stop_event)
+        try:
+            self.translator.translate_textblk_lst(
+                untranslated_blks,
+                project=project,
+                page_key=page_key,
+                full_page=False,
+            )
+        except LLMApiKeyRequiredError as e:
+            success = False
+            _show_llm_key_required_dialog(e)
+            if self.pipeline_stop_event is not None:
+                self.pipeline_stop_event.set()
+        except LLMModelRequiredError as e:
+            success = False
+            _show_llm_model_required_dialog(e)
+            if self.pipeline_stop_event is not None:
+                self.pipeline_stop_event.set()
+        except LLMBaseURLRequiredError as e:
+            success = False
+            _show_llm_base_url_required_dialog(e)
+            if self.pipeline_stop_event is not None:
+                self.pipeline_stop_event.set()
+        except LLMRequestStopped:
+            success = False
+            LOGGER.info('Translation stopped by user.')
+        except Exception as e:
+            success = False
+            _create_page_error_dialog(
+                e,
+                self.tr('Translation Failed.'),
+                'TranslationFailed',
+                page_key,
+                self.tr('Page'),
+            )
+        if success:
+            project.mark_translation_finished(page_key, self.translator.lang_target)
+        return success
+
+    def runBatchUntranslatedPipeline(self, imgtrans_proj: ProjImgTrans, stop_event: threading.Event):
+        self.initImgtransPipeline(imgtrans_proj, stop_event)
+        untranslated_map = imgtrans_proj.get_untranslated_blocks()
+        self.pipeline_pagekey_queue = [pk for pk in list(imgtrans_proj.pages.keys()) if pk in untranslated_map]
+        self.num_process_pages = len(self.pipeline_pagekey_queue)
+        self.job = self._run_untranslated_batch_pipeline
+        self.start()
+
+    def _run_untranslated_batch_pipeline(self):
+        delay = self.translator.delay()
+        stop_event = self.pipeline_stop_event or threading.Event()
+
+        while not self.pipeline_finished():
+            if stop_event.is_set():
+                self.module_thread_stopped.emit()
+                break
+
+            if len(self.pipeline_pagekey_queue) == 0:
+                stop_event.wait(0.1)
+                continue
+
+            page_key = self.pipeline_pagekey_queue.pop(0)
+            self.blockSignals(True)
+            try:
+                self._translate_untranslated_page(self.imgtrans_proj, page_key)
+            except Exception as e:
+                msg = _failure_message_for_page(
+                    self.tr('Translation Failed.'),
+                    page_key,
+                    self.tr('Page'),
+                )
+                if isinstance(e, MissingTranslatorParams):
+                    msg = msg + '\n' + self.tr('{param} is required for {translator}').format(
+                        param=str(e),
+                        translator=self.translator.name,
+                    )
+                self.blockSignals(False)
+                create_error_dialog(e, msg, 'TranslationFailed')
+            self.blockSignals(False)
+            self.finished_counter += 1
+            self.progress_changed.emit(self.finished_counter)
+
+            if not self.pipeline_finished() and delay > 0:
+                stop_event.wait(delay)
+
+
 
 class ImgtransThread(QThread):
 
@@ -2046,6 +2142,29 @@ class ModuleManager(QObject):
         """停止图像翻译流程"""
         LOGGER.info('Stopping image translation pipeline...')
         self.imgtrans_thread.requestStop()
+
+    def runBatchUntranslatedPipeline(
+        self,
+        imgtrans_proj: ProjImgTrans,
+        translator_name: str = "Gemini Playwright",
+    ):
+        _reset_llm_key_required_dialogs()
+        self.terminateRunningThread()
+        required_modules = [('translator', translator_name)]
+        self._prepare_modules_then(
+            required_modules,
+            lambda: self._startBatchUntranslatedPipeline(imgtrans_proj),
+        )
+
+    def _startBatchUntranslatedPipeline(self, imgtrans_proj: ProjImgTrans):
+        if self.prepare_msgbox is not None and self.prepare_msgbox.isVisible():
+            self.prepare_msgbox.done(0)
+        self.progress_msgbox.hide_all_bars()
+        self.progress_msgbox.translate_bar.show()
+        self.progress_msgbox.zero_progress()
+        self.progress_msgbox.show_fitted()
+        self.stop_event.clear()
+        self.translate_thread.runBatchUntranslatedPipeline(imgtrans_proj, self.stop_event)
 
     def runBlktransPipeline(
         self,

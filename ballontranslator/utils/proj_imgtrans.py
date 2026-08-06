@@ -236,6 +236,21 @@ class ProjImgTrans:
                 self.set_current_img_byidx(0)
         self._load_identity = object()
 
+    def get_untranslated_blocks(self) -> Dict[str, List[TextBlock]]:
+        """Return a mapping of page names to their untranslated TextBlocks.
+
+        >>> proj = ProjImgTrans()
+        >>> proj.pages = {'page1.png': [TextBlock(text=['test'], translation='')]}
+        >>> len(proj.get_untranslated_blocks()['page1.png'])
+        1
+        """
+        untranslated = {}
+        for pagename, blk_list in self.pages.items():
+            blks = [blk for blk in blk_list if blk.is_untranslated()]
+            if blks:
+                untranslated[pagename] = blks
+        return untranslated
+
     def get_page_progress(self, pagename: str):
         fin_code = self._image_info[pagename]['finish_code']
         return (fin_code & pcfg.module.finish_code) == pcfg.module.finish_code

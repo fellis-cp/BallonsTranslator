@@ -868,6 +868,7 @@ class MainWindow(mainwindow_cls):
         self.titleBar.exporttstyle_trigger.connect(self.export_tstyles)
         self.titleBar.darkmode_trigger.connect(self.on_darkmode_triggered)
         self.titleBar.merge_tool_trigger.connect(self.on_open_merge_tool)
+        self.titleBar.batch_translate_untranslated_trigger.connect(self.on_batch_translate_untranslated)
 
         shortcutA = QShortcut(QKeySequence("A"), self)
         shortcutA.activated.connect(self.shortcutBefore)
@@ -1067,6 +1068,44 @@ class MainWindow(mainwindow_cls):
 
     def show_OCR_keyword_window(self):
         self.ocrSubWidget.show()
+
+    def on_batch_translate_untranslated(self):
+        if not self.imgtrans_proj or self.imgtrans_proj.num_pages == 0:
+            QMessageBox.information(
+                self,
+                self.tr("Batch Translate"),
+                self.tr("No project is currently loaded.")
+            )
+            return
+
+        untranslated_map = self.imgtrans_proj.get_untranslated_blocks()
+        total_blocks = sum(len(blks) for blks in untranslated_map.values())
+
+        if total_blocks == 0:
+            QMessageBox.information(
+                self,
+                self.tr("Batch Translate"),
+                self.tr("No untranslated text blocks found in the project.")
+            )
+            return
+
+        num_pages = len(untranslated_map)
+        msg = self.tr("Found {blocks} untranslated text block(s) across {pages} page(s).\n\nDo you want to translate them using Gemini Playwright?").format(
+            blocks=total_blocks,
+            pages=num_pages,
+        )
+        reply = QMessageBox.question(
+            self,
+            self.tr("Batch Translate Untranslated"),
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.module_manager.runBatchUntranslatedPipeline(
+                self.imgtrans_proj,
+                translator_name="Gemini Playwright",
+            )
 
     def on_open_merge_tool(self):
         """打开区域合并工具对话框"""

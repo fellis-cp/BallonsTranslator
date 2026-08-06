@@ -423,9 +423,14 @@ class TitleBar(Widget):
         mergeToolAction = QAction('区域合并工具', self)
         mergeToolAction.setShortcut(QKeySequence('Ctrl+Shift+M'))
         self.merge_tool_trigger = mergeToolAction.triggered
+
+        # 批量未翻译文本处理工具
+        batchTranslateUntranslatedAction = QAction(self.tr('Scan & Translate Untranslated (Playwright)'), self)
+        self.batch_translate_untranslated_trigger = batchTranslateUntranslatedAction.triggered
         
         toolsMenu = QMenu(self.toolsToolBtn)
         toolsMenu.addAction(mergeToolAction)
+        toolsMenu.addAction(batchTranslateUntranslatedAction)
         self.toolsToolBtn.setMenu(toolsMenu)
         self.toolsToolBtn.setPopupMode(QToolButton.InstantPopup)
 
