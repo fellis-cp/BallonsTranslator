@@ -1,9 +1,9 @@
 import numpy as np
-from typing import List, Union
+from typing import Callable, List, Optional, Union
 import os
 
 from qtpy.QtWidgets import QApplication, QSlider, QMenu, QGraphicsScene, QGraphicsSceneDragDropEvent , QGraphicsView, QGraphicsSceneDragDropEvent, QGraphicsRectItem, QGraphicsItem, QScrollBar, QGraphicsPixmapItem, QGraphicsSceneMouseEvent, QGraphicsSceneContextMenuEvent, QRubberBand
-from qtpy.QtCore import Qt, QDateTime, QRectF, QPointF, QPoint, Signal, QSizeF, QEvent
+from qtpy.QtCore import Qt, QDateTime, QRectF, QPointF, QPoint, Signal, QSize, QSizeF, QEvent, QTimer
 from qtpy.QtGui import QKeySequence, QPixmap, QImage, QHideEvent, QKeyEvent, QWheelEvent, QResizeEvent, QPainter, QPen, QPainterPath, QCursor, QNativeGestureEvent
 
 try:
@@ -22,6 +22,7 @@ from .text_engine.transforms.projective_control import TextProjectiveTransformCo
 from .custom_widget import ScrollBar, FadeLabel
 from .image_edit import ImageEditMode, DrawingLayer, StrokeImgItem
 from .page_search_widget import PageSearchWidget
+from .text_engine.editing.commands import MoveByKeyCommand
 from ballontranslator.utils import shared
 from ballontranslator.utils.config import pcfg
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans
@@ -29,42 +30,6 @@ from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 CANVAS_SCALE_MAX = 10.0
 CANVAS_SCALE_MIN = 0.01
 CANVAS_SCALE_SPEED = 0.1
-
-class MoveByKeyCommand(QUndoCommand):
-    def __init__(
-        self,
-        blkitems: List[TextBlkItem],
-        direction: QPointF,
-    ) -> None:
-        super().__init__()
-        self.blkitems = blkitems
-        self.direction = direction
-        self.ori_pos_list = []
-        self.end_pos_list = []
-        for blk in blkitems:
-            pos = blk.logical_position()
-            self.ori_pos_list.append(pos)
-            self.end_pos_list.append(pos + direction)
-
-    def undo(self):
-        for blk, pos in zip(self.blkitems, self.ori_pos_list):
-            blk.set_logical_position(pos)
-            blk.oldPos = blk.pos()
-
-    def redo(self):
-        for blk, pos in zip(self.blkitems, self.end_pos_list):
-            blk.set_logical_position(pos)
-            blk.oldPos = blk.pos()
-
-    def mergeWith(self, other: QUndoCommand) -> bool:
-        canmerge = self.blkitems == other.blkitems and self.direction == other.direction
-        if canmerge:
-            self.end_pos_list = other.end_pos_list
-        return canmerge
-    
-    def id(self):
-        return 1
-
 
 class CustomGV(QGraphicsView):
     ctrl_pressed = False
@@ -135,15 +100,14 @@ class CustomGV(QGraphicsView):
         return super().keyPressEvent(e)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
-        result = super().resizeEvent(event)
+        super().resizeEvent(event)
         self.view_resized.emit()
-        return result
 
     def hideEvent(self, event: QHideEvent) -> None:
         self.hide_canvas.emit()
         return super().hideEvent(event)
 
-    def event(self, e):
+    def event(self, e: QEvent) -> bool:
         if isinstance(e, QNativeGestureEvent):
             if e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
                 self.scale_with_value.emit(e.value() + 1)
@@ -151,7 +115,7 @@ class CustomGV(QGraphicsView):
 
         return super().event(e)
     
-    def dragMoveEvent(self, e: QGraphicsSceneDragDropEvent):
+    def dragMoveEvent(self, e: QGraphicsSceneDragDropEvent) -> None:
         super().dragMoveEvent(e)
         if e.mimeData().hasUrls():
             # issue #908, https://stackoverflow.com/questions/4177720/accepting-drops-on-a-qgraphicsscene
@@ -284,6 +248,11 @@ class Canvas(QGraphicsScene):
         self.txtblkShapeControl.setParentItem(self.baseLayer)
         self.txtblkGridControl.setParentItem(self.baseLayer)
         self.txtblkProjectiveControl.setParentItem(self.baseLayer)
+        self._text_shape_refresh_timer = QTimer(self.gv)
+        self._text_shape_refresh_timer.setSingleShot(True)
+        self._text_shape_refresh_timer.timeout.connect(
+            self._refresh_text_shape_control_now
+        )
         self.hscroll_bar.valueChanged.connect(self.refresh_text_shape_control)
         self.vscroll_bar.valueChanged.connect(self.refresh_text_shape_control)
 
@@ -313,11 +282,15 @@ class Canvas(QGraphicsScene):
         self.textlayer_trans_slider: QSlider = None
         self.originallayer_trans_slider: QSlider = None
 
-    def on_switch_item(self, switch_delta: int, key_event: QKeyEvent = None):
+    def on_switch_item(
+        self,
+        switch_delta: int,
+        key_event: Optional[QKeyEvent] = None,
+    ) -> None:
         if self.textEditMode():
             self.switch_text_item.emit(switch_delta, key_event)
 
-    def img_window_size(self):
+    def img_window_size(self) -> QSize:
         if self.imgtrans_proj.inpainted_valid:
             return self.inpaintLayer.pixmap().size()
         return self.baseLayer.rect().size().toSize()
@@ -349,21 +322,30 @@ class Canvas(QGraphicsScene):
     def drawMode(self) -> bool:
         return self.editor_index == 0
 
-    def scaleUp(self):
+    def scaleUp(self) -> None:
         self.scaleImage(1 + CANVAS_SCALE_SPEED)
 
-    def scaleDown(self):
+    def scaleDown(self) -> None:
         self.scaleImage(1 - CANVAS_SCALE_SPEED)
 
-    def scaleBy(self, value: float):
+    def scaleBy(self, value: float) -> None:
         self.scaleImage(value)
 
-    def refresh_text_shape_control(self, *_args):
+    def refresh_text_shape_control(self, *_args: object) -> None:
+        # One view change can emit resize and both scrollbar signals.
+        self._text_shape_refresh_timer.start(0)
+
+    def _refresh_text_shape_control_now(self) -> None:
         self.txtblkShapeControl.requestGeometryRefresh()
         self.txtblkGridControl.requestGeometryRefresh()
         self.txtblkProjectiveControl.requestGeometryRefresh()
 
-    def bind_text_grid_control(self, item, stack_index, **callbacks):
+    def bind_text_grid_control(
+        self,
+        item: TextBlkItem,
+        stack_index: int,
+        **callbacks: Callable[..., None],
+    ) -> None:
         if self._rubber_band_target == 'grid':
             self.hide_rubber_band()
         self.txtblkProjectiveControl.clear()
@@ -376,7 +358,12 @@ class Canvas(QGraphicsScene):
         )
         self.txtblkShapeControl.hide()
 
-    def bind_text_projective_control(self, item, stack_index, **callbacks):
+    def bind_text_projective_control(
+        self,
+        item: TextBlkItem,
+        stack_index: int,
+        **callbacks: Callable[..., None],
+    ) -> None:
         if self._rubber_band_target == 'grid':
             self.hide_rubber_band()
         self.txtblkGridControl.clear()
@@ -389,14 +376,17 @@ class Canvas(QGraphicsScene):
         )
         self.txtblkShapeControl.hide()
 
-    def _restore_shape_after_transform_control(self, had_binding):
+    def _restore_shape_after_transform_control(
+        self,
+        had_binding: bool,
+    ) -> None:
         if not had_binding:
             return
         selected = self.selected_text_items()
         if len(selected) == 1:
             self.txtblkShapeControl.setBlkItem(selected[0])
 
-    def clear_text_transform_controls(self):
+    def clear_text_transform_controls(self) -> None:
         if self._rubber_band_target == 'grid':
             self.hide_rubber_band()
         had_binding = (
@@ -407,7 +397,11 @@ class Canvas(QGraphicsScene):
         self.txtblkProjectiveControl.clear()
         self._restore_shape_after_transform_control(had_binding)
 
-    def active_text_transform_control(self):
+    def active_text_transform_control(
+        self,
+    ) -> Optional[
+        Union[TextGridTransformControl, TextProjectiveTransformControl]
+    ]:
         for control in (
             self.txtblkGridControl,
             self.txtblkProjectiveControl,
@@ -416,18 +410,22 @@ class Canvas(QGraphicsScene):
                 return control
         return None
 
-    def active_transform_control_item(self):
+    def active_transform_control_item(self) -> Optional[TextBlkItem]:
         control = self.active_text_transform_control()
         return None if control is None else control.item
 
-    def _set_scene_scale(self, scale: float, refresh_control: bool = True):
+    def _set_scene_scale(
+        self,
+        scale: float,
+        refresh_control: bool = True,
+    ) -> None:
         self.scale_factor = scale
         self.baseLayer.setScale(scale)
         self.setSceneRect(0, 0, self.baseLayer.sceneBoundingRect().width(), self.baseLayer.sceneBoundingRect().height())
         if refresh_control:
             self.refresh_text_shape_control()
 
-    def render_result_img(self):
+    def render_result_img(self) -> QImage:
         self.inpaintLayer.hide()
         tlayer_opacity_before = self.textLayer.opacity()
         tlayer_visible = self.textLayer.isVisible()
@@ -462,13 +460,10 @@ class Canvas(QGraphicsScene):
         try:
             for item in text_items:
                 item.set_ui_guide_suppressed(True)
-            self.clearSelection()
             if self.textEditMode() and self.txtblkShapeControl.blk_item is not None:
                 blk_item = self.txtblkShapeControl.blk_item
                 if blk_item.is_editting():
                     blk_item.endEdit(keep_focus=False)
-                if blk_item.isSelected():
-                    blk_item.setSelected(False)
 
             for item in control_visibility:
                 item.hide()
@@ -557,7 +552,7 @@ class Canvas(QGraphicsScene):
     def adjustScrollBar(self, scrollBar: QScrollBar, factor: float):
         scrollBar.setValue(int(factor * scrollBar.value() + ((factor - 1) * scrollBar.pageStep() / 2)))
 
-    def scaleImage(self, factor: float):
+    def scaleImage(self, factor: float) -> None:
         if not self.gv.isVisible() or not self.imgtrans_proj.img_valid:
             return
         s_f = np.clip(
@@ -569,7 +564,6 @@ class Canvas(QGraphicsScene):
         scale_changed = self.scale_factor != s_f
         self.scale_factor = s_f
         self.baseLayer.setScale(self.scale_factor)
-        self.txtblkShapeControl.updateScale(self.scale_factor)
 
         if scale_changed:
             self.adjustScrollBar(self.gv.horizontalScrollBar(), factor)
@@ -583,7 +577,7 @@ class Canvas(QGraphicsScene):
         )
         self.refresh_text_shape_control()
 
-    def onViewResized(self):
+    def onViewResized(self) -> None:
         gv_w, gv_h = self.gv.geometry().width(), self.gv.geometry().height()
 
         x = gv_w - self.scaleFactorLabel.width()
@@ -599,12 +593,12 @@ class Canvas(QGraphicsScene):
         self.refresh_text_shape_control()
         self.gv.viewport().update()
         
-    def onScaleFactorChanged(self):
+    def onScaleFactorChanged(self) -> None:
         self.scaleFactorLabel.setText(f'{self.scale_factor*100:2.0f}%')
         self.scaleFactorLabel.raise_()
         self.scaleFactorLabel.startFadeAnimation()
 
-    def on_selection_changed(self):
+    def on_selection_changed(self) -> None:
         if self.txtblkShapeControl.isVisible():
             blk_item = self.txtblkShapeControl.blk_item
             if blk_item is not None and blk_item.isEditing():
