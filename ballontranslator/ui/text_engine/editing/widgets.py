@@ -36,7 +36,7 @@ class FloatingSuggestionLabel(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setFixedHeight(28)
-        self.scroll_area.wheelEvent = self.scroll_area_wheel_event
+        self.scroll_area.wheelEvent = self.wheelEvent
         
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("scroll_content")
@@ -102,13 +102,6 @@ class FloatingSuggestionLabel(QWidget):
             scrollbar.setValue(scrollbar.value() - delta // 2)
             event.accept()
 
-    def scroll_area_wheel_event(self, event):
-        scrollbar = self.scroll_area.horizontalScrollBar()
-        if scrollbar:
-            delta = event.angleDelta().y() or event.angleDelta().x()
-            scrollbar.setValue(scrollbar.value() - delta // 2)
-            event.accept()
-
     def set_suggestions(self, cursor, word, suggestions):
         self.cursor = cursor
         self.word = word
@@ -125,7 +118,8 @@ class FloatingSuggestionLabel(QWidget):
                 
         for i, sug in enumerate(suggestions):
             btn = QPushButton(sug, self.scroll_content)
-            btn.clicked.connect(lambda checked=False, s=sug: self.apply_suggestion(s))
+            btn.setProperty('suggestion', sug)
+            btn.clicked.connect(self._apply_clicked_suggestion)
             self.buttons_layout.addWidget(btn)
             
             # Stylize borders and round corners so they form a single seamless block
@@ -185,6 +179,13 @@ class FloatingSuggestionLabel(QWidget):
             
         popup_width = scroll_area_width + add_btn_width
         self.setFixedSize(popup_width, 28)
+
+    def _apply_clicked_suggestion(self, _checked: bool = False) -> None:
+        button = self.sender()
+        if isinstance(button, QPushButton):
+            suggestion = button.property('suggestion')
+            if suggestion is not None:
+                self.apply_suggestion(str(suggestion))
         
     def apply_suggestion(self, replacement):
         self.editor._replace_word(self.cursor, replacement)

@@ -2,13 +2,13 @@ import os
 
 from qtpy.QtCore import (
     QEvent,
-    QPointF,
+    QObject,
     QSize,
     QSignalBlocker,
     Qt,
     Signal,
 )
-from qtpy.QtGui import QIcon, QMouseEvent, QPainter, QPalette, QPen
+from qtpy.QtGui import QIcon, QMouseEvent
 from qtpy.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -30,13 +30,14 @@ from qtpy.QtWidgets import (
     QStyle,
     QStyleOptionButton,
     QStylePainter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .icon_rendering import render_svg_pixmap
 from .misc import themed_icon_path
-from .framelesswindow import FramelessMoveResize
+from .framelesswindow import DialogCloseButton, FramelessMoveResize
 from .llm_modality import (
     LLM_MODALITY_IMAGE,
     LLM_MODALITY_IMAGE_COLOR,
@@ -59,52 +60,17 @@ from ballontranslator.utils.config import (
 )
 from ballontranslator.utils.llm_profiles import LLM_TRANSLATOR_KEY
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans
+from ballontranslator.modules import (
+    GET_VALID_INPAINTERS,
+    GET_VALID_OCR,
+    GET_VALID_TEXTDETECTORS,
+    GET_VALID_TRANSLATORS,
+)
 
 
 RUN_PIPELINE_DIALOG_WIDTH = 510
 RUN_PIPELINE_SETTING_CONTROL_WIDTH = 100
 RUN_PIPELINE_GLOSSARY_DISPLAY_WIDTH = 100
-
-
-class DialogCloseButton(QAbstractButton):
-    """Small title-bar button that paints its own close glyph.
-
-    >>> DialogCloseButton.__name__
-    'DialogCloseButton'
-    """
-
-    def __init__(self, parent: QWidget = None):
-        super().__init__(parent)
-        self.setObjectName('RunPipelineCloseButton')
-        self.setFixedSize(26, 26)
-        self.setToolTip(self.tr('Close'))
-        self.setAccessibleName(self.tr('Close'))
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        render_hint = getattr(QPainter, 'RenderHint', QPainter).Antialiasing
-        painter.setRenderHint(render_hint)
-
-        if self.underMouse() or self.isDown():
-            color_role = getattr(QPalette, 'ColorRole', QPalette)
-            background = self.palette().color(color_role.Highlight)
-            background.setAlpha(55 if self.isDown() else 35)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(background)
-            painter.drawRoundedRect(self.rect(), 6, 6)
-
-        color_role = getattr(QPalette, 'ColorRole', QPalette)
-        color = self.palette().color(color_role.WindowText)
-        color.setAlpha(210)
-        pen = QPen(color)
-        pen.setWidthF(1.6)
-        pen.setCapStyle(getattr(getattr(Qt, 'PenCapStyle', Qt), 'RoundCap'))
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        inset = 8.5
-        end = self.width() - inset
-        painter.drawLine(QPointF(inset, inset), QPointF(end, end))
-        painter.drawLine(QPointF(end, inset), QPointF(inset, end))
 
 
 class PipelineModuleButton(QAbstractButton):
@@ -140,10 +106,11 @@ class PipelineModuleButton(QAbstractButton):
         widget_attribute = getattr(Qt, 'WidgetAttribute', Qt)
         self.setCursor(cursor_shape.PointingHandCursor)
         self.setAccessibleName(text)
+        self.setToolTip(text)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 1, 6, 1)
-        layout.setSpacing(4)
+        layout.setContentsMargins(2, 1, 2, 1)
+        layout.setSpacing(0)
 
         self.icon_label = QLabel(self)
         self.icon_label.setObjectName('RunPipelineModuleIcon')
@@ -151,12 +118,6 @@ class PipelineModuleButton(QAbstractButton):
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setAttribute(widget_attribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.icon_label)
-
-        self.text_label = QLabel(text, self)
-        self.text_label.setObjectName('RunPipelineModuleLabel')
-        self.text_label.setAttribute(widget_attribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self.text_label)
-        layout.addStretch()
 
         self.toggled.connect(self._refresh_visuals)
         self._refresh_visuals(self.isChecked())
@@ -179,9 +140,6 @@ class PipelineModuleButton(QAbstractButton):
                 background_radius=6,
             )
         )
-        self.text_label.setProperty('moduleActive', active)
-        self.text_label.style().unpolish(self.text_label)
-        self.text_label.style().polish(self.text_label)
 
     def paintEvent(self, event):
         option = QStyleOptionButton()
@@ -199,6 +157,148 @@ class PipelineModuleButton(QAbstractButton):
         if event.type() in (QEvent.Type.StyleChange, QEvent.Type.PaletteChange):
             self._refresh_visuals(self.isChecked())
         return super().changeEvent(event)
+
+
+class PipelineModuleActivator(QWidget):
+    """Toggleable pipeline stage with its own always-visible module selector.
+
+    >>> PipelineModuleActivator.__name__
+    'PipelineModuleActivator'
+    """
+
+    module_selected = Signal(str, str)
+    config_requested = Signal(str, str)
+
+    def __init__(
+        self,
+        module_type: str,
+        module_name: str,
+        options,
+        text: str,
+        modality: str,
+        parent: QWidget = None,
+        active_icon_name: str = '',
+        inactive_icon_name: str = '',
+    ) -> None:
+        super().__init__(parent)
+        self.module_type = module_type
+        self._hovered = False
+        self.setObjectName('RunPipelineModuleActivator')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self.button = PipelineModuleButton(
+            text,
+            modality,
+            self,
+            active_icon_name=active_icon_name,
+            inactive_icon_name=inactive_icon_name,
+        )
+        layout.addWidget(self.button)
+
+        self.config_button = QToolButton(self)
+        self.config_button.setObjectName('RunPipelineModuleConfigButton')
+        self.config_button.setIcon(
+            QIcon(themed_icon_path('leftbar_config_activate.svg'))
+        )
+        self.config_button.setToolTip(self.tr('Config'))
+        self.config_button.setAccessibleName(self.tr('Config'))
+        self.config_button.clicked.connect(self._request_config)
+        self.deactivate_button = QToolButton(self)
+        self.deactivate_button.setObjectName('RunPipelineModuleDeactivateButton')
+        self.deactivate_button.setIcon(
+            QIcon(themed_icon_path('titlebar_close.svg'))
+        )
+        self.deactivate_button.setIconSize(QSize(12, 12))
+        self.deactivate_button.setToolTip(self.tr('Deactivate module'))
+        self.deactivate_button.setAccessibleName(self.tr('Deactivate module'))
+        self.deactivate_button.clicked.connect(self._deactivate)
+        self.selector = BottomBorderComboBox(self)
+        self.selector.setObjectName('RunPipelineModuleSelector')
+        self.selector.setFixedWidth(136)
+        self.selector.addItems(options)
+        self.selector.setCurrentText(module_name)
+        self.selector.setToolTip(module_name)
+        self.selector.currentTextChanged.connect(self._on_module_selected)
+        self.selector.installEventFilter(self)
+        layout.addWidget(self.selector)
+        layout.addStretch(1)
+        layout.addWidget(self.config_button)
+        layout.addWidget(self.deactivate_button)
+
+        self.button.toggled.connect(self._refresh_active_state)
+        self._refresh_active_state(self.button.isChecked())
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self._refresh_aux_buttons()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self._refresh_aux_buttons()
+        super().leaveEvent(event)
+
+    def _refresh_aux_buttons(self, _checked: bool = False) -> None:
+        active = self.button.isChecked()
+        visible = self._hovered and active
+        self.config_button.setVisible(visible)
+        self.deactivate_button.setVisible(visible)
+
+    def _refresh_active_state(self, active: bool) -> None:
+        self._refresh_aux_buttons()
+        for widget in (self, self.selector):
+            widget.setProperty('moduleActive', active)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.update()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is not self.selector:
+            return super().eventFilter(watched, event)
+        if (
+            not self.button.isChecked()
+            and isinstance(event, QMouseEvent)
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self.button.setChecked(True)
+            return True
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if (
+            not self.button.isChecked()
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self.button.setChecked(True)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _deactivate(self, _checked: bool = False) -> None:
+        self.button.setChecked(False)
+
+    def _request_config(self, _checked: bool = False) -> None:
+        self.config_requested.emit(
+            self.module_type,
+            self.selector.currentText(),
+        )
+
+    def _on_module_selected(self, module_name: str) -> None:
+        self.selector.setToolTip(module_name)
+        self.module_selected.emit(self.module_type, module_name)
+
+    def setModule(self, module_name: str) -> None:
+        if self.selector.currentText() == module_name:
+            return
+        blocker = QSignalBlocker(self.selector)
+        self.selector.setCurrentText(module_name)
+        del blocker
+        self.selector.setToolTip(module_name)
 
 
 class GlossaryPathEdit(QLineEdit):
@@ -245,6 +345,8 @@ class RunPipelineDialog(QDialog):
     RENDER = 3
     translate_source_changed = Signal(str)
     translate_target_changed = Signal(str)
+    module_selected = Signal(str, str)
+    module_config_requested = Signal(str, str)
     RESIZE_BORDER_WIDTH = 5
     _module_settings_expanded = (False, False, False, False)
     _page_range = (1, None)
@@ -259,6 +361,7 @@ class RunPipelineDialog(QDialog):
         self.project = project
         self.translator_metadata = translator_metadata or {}
         self._app_event_filter_installed = False
+        self._checkbox_settings: dict[QCheckBox, tuple[object, str]] = {}
         self.setObjectName('RunPipelineDialog')
         self.setWindowTitle(self.tr('Run'))
         self.setMinimumWidth(RUN_PIPELINE_DIALOG_WIDTH)
@@ -328,28 +431,40 @@ class RunPipelineDialog(QDialog):
 
         self.run_button = QPushButton(self.tr('Run'), surface)
         self.run_button.setObjectName('RunPipelinePrimaryButton')
-        self.run_button.clicked.connect(lambda: self.done(self.RUN))
+        self.run_button.clicked.connect(self._finish_run)
 
         self.continue_button = QPushButton(self.tr('Continue'), surface)
         self.continue_button.setObjectName('RunPipelineSecondaryButton')
         self.continue_button.setDefault(True)
-        self.continue_button.clicked.connect(lambda: self.done(self.CONTINUE))
+        self.continue_button.clicked.connect(self._finish_continue)
         button_row.addWidget(self.continue_button)
         button_row.addWidget(self.run_button)
 
         self.render_button = QPushButton(self.tr('Render'), surface)
         self.render_button.setObjectName('RunPipelinePrimaryButton')
-        self.render_button.clicked.connect(lambda: self.done(self.RENDER))
+        self.render_button.clicked.connect(self._finish_render)
         self.render_button.hide()
         button_row.addWidget(self.render_button)
         layout.addLayout(button_row)
 
         self.workflow_selector.currentIndexChanged.connect(self._set_pipeline_page)
-        self.finished.connect(lambda _result: save_config())
+        self.finished.connect(self._save_config_on_finish)
         self._set_pipeline_page(self.workflow_selector.currentIndex(), persist=False)
         initial_height = self.sizeHint().height()
         self.setMinimumHeight(initial_height)
         self.resize(RUN_PIPELINE_DIALOG_WIDTH, initial_height)
+
+    def _finish_run(self, _checked: bool = False) -> None:
+        self.done(self.RUN)
+
+    def _finish_continue(self, _checked: bool = False) -> None:
+        self.done(self.CONTINUE)
+
+    def _finish_render(self, _checked: bool = False) -> None:
+        self.done(self.RENDER)
+
+    def _save_config_on_finish(self, _result: int) -> None:
+        save_config()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -472,46 +587,81 @@ class RunPipelineDialog(QDialog):
         stage_specs = (
             (
                 0,
-                self.tr('Text Detection'),
+                'textdetector',
+                pcfg.module.textdetector,
+                GET_VALID_TEXTDETECTORS(),
+                self.tr('Detection'),
                 LLM_MODALITY_VISION,
                 'textdetect_activate.svg',
                 'textdetect.svg',
             ),
-            (1, self.tr('OCR'), LLM_MODALITY_VISION, '', ''),
-            (3, self.tr('Inpainting'), LLM_MODALITY_IMAGE, '', ''),
-            (2, self.tr('Translation'), LLM_MODALITY_TEXT, '', ''),
+            (
+                1,
+                'ocr',
+                pcfg.module.ocr,
+                GET_VALID_OCR(),
+                self.tr('OCR'),
+                LLM_MODALITY_VISION,
+                '',
+                '',
+            ),
+            (
+                3,
+                'inpainter',
+                pcfg.module.inpainter,
+                GET_VALID_INPAINTERS(),
+                self.tr('Inpainting'),
+                LLM_MODALITY_IMAGE,
+                '',
+                '',
+            ),
+            (
+                2,
+                'translator',
+                pcfg.module.translator,
+                GET_VALID_TRANSLATORS(),
+                self.tr('Translation'),
+                LLM_MODALITY_TEXT,
+                '',
+                '',
+            ),
         )
         self.module_buttons = []
+        self.module_activators = []
         for display_index, (
             stage_index,
+            module_type,
+            module_name,
+            module_options,
             name,
             modality,
             active_icon,
             inactive_icon,
         ) in enumerate(stage_specs):
-            button = PipelineModuleButton(
+            activator = PipelineModuleActivator(
+                module_type,
+                module_name,
+                module_options,
                 name,
                 modality,
                 stages,
                 active_icon_name=active_icon,
                 inactive_icon_name=inactive_icon,
             )
+            button = activator.button
             button.setChecked(pcfg.module.stage_enabled(stage_index))
-            button.toggled.connect(
-                lambda checked,
-                stage_index=stage_index,
-                section_index=display_index: self._on_stage_toggled(
-                    stage_index,
-                    section_index,
-                    checked,
-                )
-            )
+            button.setProperty('stageIndex', stage_index)
+            button.setProperty('sectionIndex', display_index)
+            button.toggled.connect(self._on_stage_button_toggled)
+            activator.module_selected.connect(self.module_selected.emit)
+            activator.config_requested.connect(self.module_config_requested.emit)
             stage_layout.addWidget(
-                button,
+                activator,
                 display_index // 2,
                 display_index % 2,
             )
             self.module_buttons.append(button)
+            self.module_activators.append(activator)
         layout.addWidget(stages)
 
         self._add_section_divider(layout, self.tr('Settings'))
@@ -575,14 +725,26 @@ class RunPipelineDialog(QDialog):
         object_name: str,
         text: str,
         checked: bool,
-        on_toggled,
+        target: object,
+        attribute: str,
     ) -> QCheckBox:
         checkbox = QCheckBox(text, parent)
         checkbox.setObjectName(object_name)
         checkbox.setChecked(checked)
-        checkbox.toggled.connect(on_toggled)
+        self._checkbox_settings[checkbox] = (target, attribute)
+        checkbox.toggled.connect(self._on_checkbox_setting_toggled)
         layout.addWidget(checkbox)
         return checkbox
+
+    def _on_checkbox_setting_toggled(self, checked: bool) -> None:
+        checkbox = self.sender()
+        if not isinstance(checkbox, QCheckBox):
+            return
+        target_and_attribute = self._checkbox_settings.get(checkbox)
+        if target_and_attribute is None:
+            return
+        target, attribute = target_and_attribute
+        setattr(target, attribute, checked)
 
     def _build_detector_settings(self, section: QWidget, layout: QVBoxLayout):
         self.keep_existing_lines = self._add_checkbox_setting(
@@ -591,7 +753,8 @@ class RunPipelineDialog(QDialog):
             'RunPipelineKeepExistingLines',
             self.tr('Keep Existing Lines'),
             pcfg.module.keep_exist_textlines,
-            lambda checked: setattr(pcfg.module, 'keep_exist_textlines', checked),
+            pcfg.module,
+            'keep_exist_textlines',
         )
 
     def _build_ocr_settings(self, section: QWidget, layout: QVBoxLayout):
@@ -601,7 +764,8 @@ class RunPipelineDialog(QDialog):
             'RunPipelineRemoveEmptyTextblocks',
             self.tr('Remove empty textblocks'),
             pcfg.restore_ocr_empty,
-            lambda checked: setattr(pcfg, 'restore_ocr_empty', checked),
+            pcfg,
+            'restore_ocr_empty',
         )
         self.font_detection = self._add_checkbox_setting(
             section,
@@ -609,7 +773,8 @@ class RunPipelineDialog(QDialog):
             'RunPipelineFontDetection',
             self.tr('Font Detection'),
             pcfg.module.ocr_font_detect,
-            lambda checked: setattr(pcfg.module, 'ocr_font_detect', checked),
+            pcfg.module,
+            'ocr_font_detect',
         )
 
         postprocess_label = QLabel(self.tr('Letter Case'), section)
@@ -637,12 +802,8 @@ class RunPipelineDialog(QDialog):
             button = QRadioButton(text, postprocess_options_row)
             button.setObjectName('RunPipelineOCRTextPostprocessOption')
             button.setChecked(pcfg.module.ocr_text_postprocess == mode)
-            button.toggled.connect(
-                lambda checked, mode=mode: self._on_ocr_text_postprocess_toggled(
-                    mode,
-                    checked,
-                )
-            )
+            button.setProperty('textPostprocessMode', mode)
+            button.toggled.connect(self._on_ocr_text_postprocess_toggled)
             self.ocr_text_postprocess_group.addButton(button)
             self.ocr_text_postprocess_buttons[mode] = button
             postprocess_layout.addWidget(button)
@@ -650,10 +811,12 @@ class RunPipelineDialog(QDialog):
                 postprocess_layout.addStretch()
         layout.addWidget(postprocess_options_row)
 
-    @staticmethod
-    def _on_ocr_text_postprocess_toggled(mode: str, checked: bool):
-        if checked:
-            pcfg.module.ocr_text_postprocess = mode
+    def _on_ocr_text_postprocess_toggled(self, checked: bool) -> None:
+        button = self.sender()
+        if checked and isinstance(button, QRadioButton):
+            pcfg.module.ocr_text_postprocess = button.property(
+                'textPostprocessMode'
+            )
 
     def _build_inpainting_settings(self, section: QWidget, layout: QVBoxLayout):
         self.skip_simple_cases = self._add_checkbox_setting(
@@ -662,7 +825,8 @@ class RunPipelineDialog(QDialog):
             'RunPipelineSkipSimpleCases',
             self.tr('Skip simple cases'),
             pcfg.module.check_need_inpaint,
-            lambda checked: setattr(pcfg.module, 'check_need_inpaint', checked),
+            pcfg.module,
+            'check_need_inpaint',
         )
         self.filter_mask_by_text_boxes = self._add_checkbox_setting(
             section,
@@ -670,7 +834,8 @@ class RunPipelineDialog(QDialog):
             'RunPipelineFilterMaskByTextBoxes',
             self.tr('Filter mask by text boxes'),
             pcfg.module.filter_mask_by_bboxes,
-            lambda checked: setattr(pcfg.module, 'filter_mask_by_bboxes', checked),
+            pcfg.module,
+            'filter_mask_by_bboxes',
         )
 
     def _translation_options(self, key: str, current: str):
@@ -816,11 +981,8 @@ class RunPipelineDialog(QDialog):
             self._llm_settings_visible
             and pcfg.module.llm_translate_context == LLMTranslateContext.HISTORY
         )
-        translation_grid.addWidget(
-            llm_context_row if self._llm_settings_visible else context_row,
-            1,
-            0,
-        )
+        translation_grid.addWidget(context_row, 1, 0)
+        translation_grid.addWidget(llm_context_row, 1, 0)
         translation_grid.addWidget(history_budget_row, 1, 1)
 
         glossary_row = QWidget(section)
@@ -865,6 +1027,7 @@ class RunPipelineDialog(QDialog):
         )
         glossary_row.setVisible(self._llm_settings_visible)
         mode_row = QWidget(section)
+        self.glossary_mode_row = mode_row
         mode_row.setObjectName('RunPipelineGeneralSettingRow')
         mode_layout = QHBoxLayout(mode_row)
         mode_layout.setContentsMargins(0, 0, 0, 0)
@@ -902,6 +1065,39 @@ class RunPipelineDialog(QDialog):
         self.glossary_mode_combobox.currentIndexChanged.connect(
             self._on_glossary_mode_changed
         )
+
+    def setTranslatorMetadata(self, metadata: dict) -> None:
+        self.translator_metadata = metadata or {}
+        source = self.translator_metadata.get(
+            'lang_source',
+            pcfg.module.translate_source,
+        )
+        target = self.translator_metadata.get(
+            'lang_target',
+            pcfg.module.translate_target,
+        )
+        for combobox, key, current in (
+            (self.source_combobox, 'supported_src_list', source),
+            (self.target_combobox, 'supported_tgt_list', target),
+        ):
+            blocker = QSignalBlocker(combobox)
+            combobox.clear()
+            combobox.addItems(self._translation_options(key, current))
+            combobox.setCurrentText(current)
+            del blocker
+
+        self._llm_settings_visible = (
+            self.translator_metadata.get('name') == LLM_TRANSLATOR_KEY
+        )
+        self.context_row.setVisible(not self._llm_settings_visible)
+        self.llm_context_row.setVisible(self._llm_settings_visible)
+        self.history_budget_row.setVisible(
+            self._llm_settings_visible
+            and pcfg.module.llm_translate_context == LLMTranslateContext.HISTORY
+        )
+        self.glossary_row.setVisible(self._llm_settings_visible)
+        self.glossary_mode_row.setVisible(self._llm_settings_visible)
+        self._fit_to_current_workflow()
 
     def _on_translate_source_changed(self, source: str):
         pcfg.module.translate_source = source
@@ -985,15 +1181,8 @@ class RunPipelineDialog(QDialog):
             body.setVisible(header.isChecked())
             self.module_settings_headers[key] = header
             self.module_settings_bodies[key] = body
-            header.toggled.connect(
-                lambda expanded, key=key, header=header, body=body:
-                self._set_module_settings_expanded(
-                    key,
-                    header,
-                    body,
-                    expanded,
-                )
-            )
+            header.setProperty('settingsKey', key)
+            header.toggled.connect(self._on_settings_header_toggled)
         else:
             body = section
             body_layout = section_layout
@@ -1002,6 +1191,15 @@ class RunPipelineDialog(QDialog):
         if show_header:
             return section, body, body_layout
         return section, body_layout
+
+    def _on_settings_header_toggled(self, expanded: bool) -> None:
+        header = self.sender()
+        if not isinstance(header, ExpandingToolButton):
+            return
+        key = header.property('settingsKey')
+        body = self.module_settings_bodies.get(key)
+        if body is not None:
+            self._set_module_settings_expanded(key, header, body, expanded)
 
     def _project_page_names(self):
         pages = getattr(self.project, 'pages', None)
@@ -1037,6 +1235,22 @@ class RunPipelineDialog(QDialog):
             )
         self._refresh_progress()
         self._fit_to_current_workflow()
+
+    def _on_stage_button_toggled(self, checked: bool) -> None:
+        button = self.sender()
+        if not isinstance(button, PipelineModuleButton):
+            return
+        self._on_stage_toggled(
+            int(button.property('stageIndex')),
+            int(button.property('sectionIndex')),
+            checked,
+        )
+
+    def setModuleSelection(self, module_type: str, module_name: str) -> None:
+        for activator in self.module_activators:
+            if activator.module_type == module_type:
+                activator.setModule(module_name)
+                return
 
     def _set_module_settings_expanded(
         self,

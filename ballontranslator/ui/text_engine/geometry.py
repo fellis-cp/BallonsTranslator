@@ -18,7 +18,6 @@ from ballontranslator.utils.fontformat import (
     GridTextTransform,
     ProjectiveTextTransform,
     TextTransformStack,
-    TextTransformState,
 )
 from ballontranslator.utils.textblock import TextAlignment
 from .rendering.surface import NonlinearTextSurfaceRenderer
@@ -54,7 +53,7 @@ class TextItemGeometryController:
     def __init__(self, item: "TextBlkItem") -> None:
         self.item = item
         self.display_rect = QRectF(0, 0, 1, 1)
-        self.preview: Optional[TextTransformState] = None
+        self.preview: Optional[TextTransformStack] = None
         self.compiled = CompiledTextTransform(
             TextTransformStack(), QTransform()
         )
@@ -77,7 +76,7 @@ class TextItemGeometryController:
         self.detach_layout_renderer()
         self.detach_surface_mapper()
         self.compiled = CompiledTextTransform(
-            self.canonical().stack, QTransform()
+            self.canonical(), QTransform()
         )
         self._compiled_input_key = None
         self._compile_deferred = False
@@ -121,28 +120,21 @@ class TextItemGeometryController:
         self._update_depth = 0
         self._flush_update()
 
-    def canonical(self) -> TextTransformState:
+    def canonical(self) -> TextTransformStack:
         """Return the committed model state, excluding any active preview."""
         # Persistence and transform undo use the TextBlock-owned format.
         # item.fontformat may be a temporary render copy during formatting.
         fontformat = self.item.blk.fontformat
         if not isinstance(fontformat.text_transform, TextTransformStack):
             raise ValueError('live font format requires a typed transform stack')
-        return TextTransformState(
-            fontformat.text_transform,
-            fontformat.glyph_slant_angle,
-        )
+        return fontformat.text_transform
 
-    def effective(self) -> TextTransformState:
+    def effective(self) -> TextTransformStack:
         """Return the preview state when active, otherwise committed state."""
         return self.preview if self.preview is not None else self.canonical()
 
     def is_neutral(self) -> bool:
-        state = self.effective()
-        return (
-            state.stack.is_neutral()
-            and state.glyph_slant_angle == 0.0
-        )
+        return self.effective().is_neutral()
 
     def visual_is_neutral(self) -> bool:
         return (
@@ -186,7 +178,7 @@ class TextItemGeometryController:
             return
         self._update_dirty = False
         self.item.refresh_cache_policy()
-        if self.item.is_editting():
+        if self.item.isEditing():
             self.item.updateMicroFocus()
 
     def compensated_matrix(
@@ -612,7 +604,7 @@ class TextItemGeometryController:
         item.prepareGeometryChange()
         self.display_rect = rect
         item.layout.setMaxSize(rect.width(), rect.height())
-        if not self.effective().stack.is_neutral():
+        if self.effective().has_active_stages:
             self.refresh_compiled_geometry()
         self.sync_origin()
         if (
@@ -746,7 +738,7 @@ class TextItemGeometryController:
             with self.update_transaction():
                 self.display_rect.setWidth(width)
                 self.display_rect.setHeight(height)
-                if not self.effective().stack.is_neutral():
+                if self.effective().has_active_stages:
                     self.refresh_compiled_geometry()
                 self.sync_origin()
                 new_anchor_parent = item.mapToParent(
@@ -764,10 +756,10 @@ class TextItemGeometryController:
             item.layout.documentSizeChanged.emit(QSizeF(final_size))
 
     def requires_no_cache(self) -> bool:
-        return self.compiled.requires_no_cache
+        return not self.compiled.is_identity
 
     def requires_custom_resize(self) -> bool:
-        return self.compiled.requires_custom_resize
+        return not self.compiled.is_identity
 
     def _set_surface_mapper(self, mapper) -> bool:
         """Install the compiler's sole optional nonlinear surface mapper."""
@@ -795,10 +787,6 @@ class TextItemGeometryController:
         self.request_update()
         return geometry_changed
 
-    def refresh_surface_mapper(self) -> bool:
-        """Compatibility boundary for layout replacement and padding changes."""
-        return self.refresh_compiled_geometry()
-
     def refresh_compiled_geometry(self, *, force: bool = False) -> bool:
         # Rich-text formatting emits several intermediate document sizes.
         # Only the settled geometry is observable after the edit block.
@@ -812,7 +800,7 @@ class TextItemGeometryController:
         logical_rect = self.logical_rect()
         source_rect = self.source_rect()
         input_key = (
-            state.stack,
+            state.transforms,
             self.item.fontformat.vertical,
             logical_rect.x(),
             logical_rect.y(),
@@ -831,10 +819,10 @@ class TextItemGeometryController:
                 or source_rect.width() <= 0.0
                 or source_rect.height() <= 0.0
             ):
-                compiled = CompiledTextTransform(state.stack, QTransform())
+                compiled = CompiledTextTransform(state, QTransform())
             else:
                 compiled = compile_text_transform_stack(
-                    state.stack,
+                    state,
                     logical_rect,
                     source_rect,
                     self.item.fontformat.vertical,
@@ -980,7 +968,7 @@ class TextItemGeometryController:
             else self.layout_renderer.render_cache_key()
         )
         selection_key = None
-        if self.item.is_editting():
+        if self.item.isEditing():
             cursor = self.item.textCursor()
             if cursor.hasSelection():
                 selection_key = (
@@ -1017,7 +1005,7 @@ class TextItemGeometryController:
                 layout.defer_cursor_paint = previous
 
         interactive = (
-            self.item.is_editting()
+            self.item.isEditing()
             or self.item.reshaping
             or self.preview is not None
         )
@@ -1044,7 +1032,7 @@ class TextItemGeometryController:
                     not self.item.reshaping and self.preview is None
                 ),
             )
-            if cache_hit and self.item.is_editting():
+            if cache_hit and self.item.isEditing():
                 self._probe_surface_cursor(
                     painter, option, widget, base_paint
                 )
@@ -1152,7 +1140,7 @@ class TextItemGeometryController:
     def _apply_box(self, compiled: CompiledTextTransform) -> bool:
         self.item.setFlag(
             QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges,
-            compiled.requires_custom_resize,
+            not compiled.is_identity,
         )
         with self.update_transaction():
             changed = self.install(compiled)
@@ -1181,15 +1169,14 @@ class TextItemGeometryController:
         self,
         was_visual_neutral: bool,
         was_effect_neutral: bool,
-        target: TextTransformState,
+        target: TextTransformStack,
     ) -> bool:
         item = self.item
         effect_neutral = item.effect_renderer._text_transform_is_neutral()
         became_effect_neutral = not was_effect_neutral and effect_neutral
         became_visual_neutral = (
             not was_visual_neutral
-            and target.stack.is_neutral()
-            and target.glyph_slant_angle == 0.0
+            and target.is_neutral()
         )
         if not became_effect_neutral and not became_visual_neutral:
             return False
@@ -1198,7 +1185,7 @@ class TextItemGeometryController:
 
     def _apply_effective_transition(
         self,
-        target: TextTransformState,
+        target: TextTransformStack,
         *,
         was_visual_neutral: bool,
         was_effect_neutral: bool,
@@ -1216,7 +1203,7 @@ class TextItemGeometryController:
         )
         geometry_changed = (
             self.refresh_compiled_geometry()
-            if self.compiled.stack != target.stack
+            if self.compiled.stack.transforms != target.transforms
             else False
         )
         finalized = self._finalize_neutral(
@@ -1233,7 +1220,7 @@ class TextItemGeometryController:
 
     def set(
         self,
-        state: TextTransformState = None,
+        state: TextTransformStack,
         *,
         preview: bool = False,
     ) -> bool:
@@ -1241,14 +1228,9 @@ class TextItemGeometryController:
         item = self.item
         canonical = self.canonical()
         current = self.effective()
-        if state is None:
-            target = current if preview else canonical
-        elif isinstance(state, TextTransformState):
-            target = TextTransformState(
-                state.stack, state.glyph_slant_angle
-            )
-        else:
-            raise TypeError('text transform edits require TextTransformState')
+        if not isinstance(state, TextTransformStack):
+            raise TypeError('text transform edits require TextTransformStack')
+        target = state
 
         if preview:
             if target == current:
@@ -1271,29 +1253,29 @@ class TextItemGeometryController:
         render_format_changed = (
             render_format is not None
             and render_format is not model_format
-            and TextTransformState(
-                render_format.text_transform,
-                render_format.glyph_slant_angle,
-            ) != target
+            and render_format.text_transform != target
         )
         if target == current and not model_changed and not render_format_changed:
             return False
+        had_preview = self.preview is not None
         was_visual_neutral = self.visual_is_neutral()
         was_effect_neutral = (
             item.effect_renderer._text_transform_is_neutral()
         )
         if model_changed:
-            model_format.text_transform = target.stack
-            model_format.glyph_slant_angle = target.glyph_slant_angle
+            model_format.text_transform = target
         if render_format_changed:
-            render_format.text_transform = target.stack
-            render_format.glyph_slant_angle = target.glyph_slant_angle
+            render_format.text_transform = target
         self.preview = None
         visual_changed = self._apply_effective_transition(
             target,
             was_visual_neutral=was_visual_neutral,
             was_effect_neutral=was_effect_neutral,
         )
+        if had_preview and not visual_changed:
+            # Committing identical preview geometry still switches surface
+            # quality and glyph caches back to their persistent render path.
+            item.update()
         changed = (
             model_changed
             or render_format_changed

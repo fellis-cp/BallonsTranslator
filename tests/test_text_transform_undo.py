@@ -52,7 +52,9 @@ from ballontranslator.ui.text_engine.transforms.controls import (
     CommittedTransformControl,
 )
 from ballontranslator.ui.text_engine.shape_control import TextBlkShapeControl
-from ballontranslator.ui.text_engine.transforms.editor import TextTransformEditSession
+from ballontranslator.ui.text_engine.transforms.edit_session import (
+    TextTransformEditSession,
+)
 from ballontranslator.ui.text_engine.editing.manager import SceneTextManager
 from ballontranslator.ui import shared_widget as SW
 from ballontranslator.ui.text_engine.rendering.glyph import (
@@ -92,7 +94,6 @@ from ballontranslator.utils.fontformat import (
     ProjectiveTextTransform,
     SineTextTransform,
     TextTransformStack,
-    TextTransformState,
 )
 from ballontranslator.utils import shared
 from ballontranslator.utils import config as C
@@ -109,10 +110,7 @@ TEST_LINES = (
     "☀ ☁ ☂ ☃ ★ ☆ ☎ ☯ ♠ ♥ ♦ ♣ ⚠ ⚽ ⚾ ㊗ ㊙ ! @ # $",
 )
 def transform_state(*transforms, glyph_slant_angle=0.0):
-    return TextTransformState(
-        TextTransformStack(tuple(transforms)),
-        glyph_slant_angle,
-    )
+    return TextTransformStack(tuple(transforms), glyph_slant_angle)
 
 
 NEUTRAL = transform_state()
@@ -155,10 +153,7 @@ class TextTransformTestBase(unittest.TestCase):
             self.assertEqual(item.toPlainText(), text)
             self.assertEqual(pair.e_trans.toPlainText(), text)
             self.assertEqual(
-                TextTransformState(
-                    item.blk.fontformat.text_transform,
-                    item.blk.fontformat.glyph_slant_angle,
-                ),
+                item.blk.fontformat.text_transform,
                 transform,
             )
 
@@ -307,6 +302,7 @@ class ExtendedTextTransformModelTest(TextTransformTestBase):
             text_transform=payload,
             glyph_slant_angle=7.0,
         )
+        self.assertEqual(font_format.text_transform.glyph_slant_angle, 7.0)
         serialized = font_format.to_serializable_dict()
         self.assertEqual(serialized['text_transform'], payload)
         self.assertEqual(serialized['glyph_slant_angle'], 7.0)
@@ -319,6 +315,10 @@ class ExtendedTextTransformModelTest(TextTransformTestBase):
         self.assertEqual(
             restored.fontformat.text_transform,
             font_format.text_transform,
+        )
+        self.assertEqual(
+            restored.fontformat.text_transform.glyph_slant_angle,
+            7.0,
         )
         self.assertEqual(restored.fontformat.glyph_slant_angle, 7.0)
 
@@ -386,6 +386,17 @@ class ExtendedTextTransformModelTest(TextTransformTestBase):
             compiled.native_matrix,
             projective_transform_matrix(transform, rect),
         )
+
+    def test_live_transform_boundaries_require_typed_stacks(self):
+        rect = QRectF(0, 0, 100, 50)
+        with self.assertRaisesRegex(TypeError, 'requires TextTransformStack'):
+            compile_text_transform_stack(
+                [ProjectiveTextTransform()], rect, rect, False
+            )
+
+        item, _ = self._make_pair(0, TEST_LINES[0], False)
+        with self.assertRaisesRegex(TypeError, 'require TextTransformStack'):
+            item.set_text_transform(None)
 
     def test_persisted_transform_values_are_not_range_validated(self):
         font_format = FontFormat(
@@ -787,6 +798,21 @@ class TextTransformPanelTest(TextTransformTestBase):
         self.addCleanup(panel.deleteLater)
         return panel
 
+    @staticmethod
+    def _set_stack(panel, state):
+        panel._set_transform_states([state])
+
+    def test_panel_normalizes_font_formats_only_at_its_public_boundary(self):
+        panel = self._make_panel()
+        state = transform_state(GridTextTransform())
+        font_format = FontFormat()
+        font_format.text_transform = state
+
+        panel.set_active_format(font_format)
+        self.assertEqual(panel._transform_panel_types, ('grid',))
+        with self.assertRaisesRegex(TypeError, 'requires TextTransformStack'):
+            panel._set_transform_states([font_format])
+
     def test_stack_shape_update_syncs_content_height_once(self):
         panel = self._make_panel()
         with patch.object(
@@ -794,7 +820,7 @@ class TextTransformPanelTest(TextTransformTestBase):
             '_sync_content_height',
             wraps=panel._sync_content_height,
         ) as sync_height:
-            panel.set_transform(transform_state(GridTextTransform()))
+            self._set_stack(panel, transform_state(GridTextTransform()))
 
         sync_height.assert_called_once_with()
 
@@ -845,7 +871,8 @@ class TextTransformPanelTest(TextTransformTestBase):
         panel.add_transform_button.menu().actions()[0].trigger()
         self.assertEqual(added, ['projective'])
 
-        panel.set_transform(
+        self._set_stack(
+            panel,
             transform_state(ProjectiveTextTransform(), BendTextTransform())
         )
         operation_panel = panel.transform_panels[0]
@@ -863,9 +890,12 @@ class TextTransformPanelTest(TextTransformTestBase):
     def test_panel_grows_until_its_scrollable_maximum(self):
         panel = self._make_panel()
         initial_height = panel.sizeHint().height()
-        panel.set_transform(transform_state(*(
-            ProjectiveTextTransform() for _index in range(10)
-        )))
+        self._set_stack(
+            panel,
+            transform_state(*(
+                ProjectiveTextTransform() for _index in range(10)
+            )),
+        )
         self.assertGreater(panel.sizeHint().height(), initial_height)
         self.assertEqual(panel.sizeHint().height(), panel.MAX_CONTENT_HEIGHT)
         self.assertEqual(panel.maximumHeight(), panel.MAX_CONTENT_HEIGHT)
@@ -889,10 +919,13 @@ class TextTransformPanelTest(TextTransformTestBase):
 
     def test_transform_cards_select_on_card_and_parameter_interaction(self):
         panel = self._make_panel()
-        panel.set_transform(transform_state(
-            GridTextTransform(),
-            ProjectiveTextTransform(),
-        ))
+        self._set_stack(
+            panel,
+            transform_state(
+                GridTextTransform(),
+                ProjectiveTextTransform(),
+            ),
+        )
         selected = []
         panel.transform_selected.connect(selected.append)
 
@@ -927,7 +960,7 @@ class TextTransformPanelTest(TextTransformTestBase):
         self.app.processEvents()
         for transform, parameter in cases:
             with self.subTest(transform=transform.transform_type):
-                panel.set_transform(transform_state(transform))
+                self._set_stack(panel, transform_state(transform))
                 panel.clear_transform_selection(emit=False)
                 label = panel.transform_panels[0].controls[parameter].label
                 QTest.mousePress(
@@ -949,7 +982,7 @@ class TextTransformPanelTest(TextTransformTestBase):
 
     def test_sine_controls_use_wave_language_and_percentage_values(self):
         panel = self._make_panel()
-        panel.set_transform(transform_state(SineTextTransform()))
+        self._set_stack(panel, transform_state(SineTextTransform()))
         controls = panel.transform_panels[0].controls
         self.assertEqual(
             [control.label.text() for control in controls.values()],
@@ -1087,7 +1120,7 @@ class TextTransformPanelTest(TextTransformTestBase):
 
         self.assertEqual(previews, [(0, 'horizontal_divisions', 1)])
         self.assertIsInstance(previews[0][2], int)
-        updated = item._effective_text_transform().stack[0]
+        updated = item._effective_text_transform()[0]
         self.assertEqual(updated.horizontal_divisions, 2)
         self.assertIsInstance(updated.horizontal_divisions, int)
         control._finish_drag()
@@ -1193,7 +1226,7 @@ class TextTransformPanelTest(TextTransformTestBase):
                 state = transform_state(transform)
                 item.set_text_transform(state)
                 panel = self._make_panel()
-                panel.set_transform(state)
+                self._set_stack(panel, state)
                 SW.canvas = canvas
                 session = TextTransformEditSession(SimpleNamespace(), panel)
                 panel.transform_panels[0].card_clicked.emit(0)
@@ -1311,6 +1344,128 @@ class TextTransformPanelTest(TextTransformTestBase):
 
 
 class TextTransformUndoTest(TextTransformTestBase):
+    def test_parameter_preview_repaints_only_changed_items(self):
+        states = (
+            transform_state(ProjectiveTextTransform(horizontal_scale=1.0)),
+            transform_state(ProjectiveTextTransform(horizontal_scale=1.2)),
+        )
+        preview_changes = (True, False)
+        cancel_changes = (False, True)
+        updates = []
+
+        def make_item(index, state):
+            return SimpleNamespace(
+                blk=SimpleNamespace(
+                    fontformat=FontFormat(text_transform=state)
+                ),
+                _effective_text_transform=lambda: state,
+                set_text_transform=(
+                    lambda _state, *, preview=False:
+                    preview_changes[index]
+                ),
+                clear_text_transform_preview=(
+                    lambda: cancel_changes[index]
+                ),
+                update=lambda: updates.append(index),
+            )
+
+        session = object.__new__(TextTransformEditSession)
+        session.items = [
+            make_item(index, state)
+            for index, state in enumerate(states)
+        ]
+        session.drag_before = None
+        session.drag_key = None
+
+        session.preview_parameter_delta(0, 'horizontal_scale', 0.1)
+        self.assertEqual(updates, [0])
+
+        updates.clear()
+        session.preview_parameter_delta(0, 'vertical_scale', 0.1)
+        self.assertCountEqual(updates, [0, 1])
+        self.assertEqual(len(updates), 2)
+
+        updates.clear()
+        session.cancel_preview()
+        self.assertEqual(updates, [1])
+
+    def test_command_transitions_schedule_repaint_without_session_repaint(self):
+        previous_canvas = getattr(SW, 'canvas', None)
+        previous_active_format = C.active_format
+        self.addCleanup(setattr, SW, 'canvas', previous_canvas)
+        self.addCleanup(setattr, C, 'active_format', previous_active_format)
+        C.active_format = None
+
+        transitions = (
+            (
+                'matrix',
+                transform_state(ProjectiveTextTransform(horizontal_scale=1.2)),
+            ),
+            ('surface', transform_state(BendTextTransform(0.4))),
+            ('glyph-layout', transform_state(glyph_slant_angle=10.0)),
+        )
+        for render_path, after in transitions:
+            with self.subTest(render_path=render_path):
+                scene = QGraphicsScene()
+                item, _ = self._make_pair(0, TEST_LINES[0], False)
+                scene.addItem(item)
+                repaints = []
+                scene.changed.connect(repaints.append)
+                self.app.processEvents()
+                repaints.clear()
+
+                refreshed_states = []
+                session = object.__new__(TextTransformEditSession)
+                session.items = [item]
+                session.controls = SimpleNamespace(
+                    set_transform_items=lambda _items: refreshed_states.append(
+                        item.blk.fontformat.text_transform
+                    )
+                )
+                session.selected_index = None
+                SW.canvas = SimpleNamespace(
+                    clear_text_transform_controls=lambda: None,
+                )
+                stack = QUndoStack()
+                command = SetTextTransformCommand.create(
+                    [item], [NEUTRAL], [after], session._sync_transform_ui
+                )
+
+                stack.push(command)
+                self.app.processEvents()
+                self.assertTrue(repaints)
+                self.assertEqual(refreshed_states[-1], after)
+
+                repaints.clear()
+                stack.undo()
+                self.app.processEvents()
+                self.assertTrue(repaints)
+                self.assertEqual(refreshed_states[-1], NEUTRAL)
+
+                repaints.clear()
+                stack.redo()
+                self.app.processEvents()
+                self.assertTrue(repaints)
+                self.assertEqual(refreshed_states[-1], after)
+
+                stack.undo()
+                item.set_text_transform(after, preview=True)
+                self.app.processEvents()
+                repaints.clear()
+                stack.push(SetTextTransformCommand(
+                    [item], [NEUTRAL], [after], session._sync_transform_ui
+                ))
+                self.app.processEvents()
+                self.assertTrue(
+                    repaints,
+                    f'{render_path} preview commit did not schedule repaint',
+                )
+                self.assertIsNone(item.geometry_controller.preview)
+                self.assertEqual(refreshed_states[-1], after)
+
+                item.geometry_controller.release_render_resources()
+                scene.removeItem(item)
+
     def test_grid_modal_preview_switch_and_cancel_do_not_create_undo(self):
         previous_canvas = getattr(SW, 'canvas', None)
         self.addCleanup(setattr, SW, 'canvas', previous_canvas)
@@ -1370,11 +1525,11 @@ class TextTransformUndoTest(TextTransformTestBase):
         ))
         self.assertEqual(stack.count(), 0)
         self.assertEqual(
-            item._effective_text_transform().stack[0], grid
+            item._effective_text_transform()[0], grid
         )
         self.assertTrue(controller._finish_modal(False))
         self.assertEqual(stack.count(), 0)
-        self.assertEqual(item._effective_text_transform().stack[0], grid)
+        self.assertEqual(item._effective_text_transform()[0], grid)
 
         self.assertTrue(controller._start_modal('translate', start))
         self.assertTrue(controller._update_modal(start + QPointF(20, 15)))
@@ -1418,7 +1573,7 @@ class TextTransformUndoTest(TextTransformTestBase):
         session.begin_grid_edit(0)
         session.preview_grid_points(0, points)
         self.assertEqual(
-            item._effective_text_transform().stack[0].control_points[4],
+            item._effective_text_transform()[0].control_points[4],
             (0.62, 0.38),
         )
         self.assertEqual(
@@ -1549,10 +1704,7 @@ class TextTransformUndoTest(TextTransformTestBase):
                     for transform, text in reversed(expected[:-1]):
                         stack.undo()
                         self.assertEqual(
-                            TextTransformState(
-                                item.blk.fontformat.text_transform,
-                                item.blk.fontformat.glyph_slant_angle,
-                            ),
+                            item.blk.fontformat.text_transform,
                             transform,
                         )
                         self.assertEqual(item.toPlainText(), text)
@@ -1560,10 +1712,7 @@ class TextTransformUndoTest(TextTransformTestBase):
                     for transform, text in expected[1:]:
                         stack.redo()
                         self.assertEqual(
-                            TextTransformState(
-                                item.blk.fontformat.text_transform,
-                                item.blk.fontformat.glyph_slant_angle,
-                            ),
+                            item.blk.fontformat.text_transform,
                             transform,
                         )
                         self.assertEqual(item.toPlainText(), text)
@@ -1608,11 +1757,11 @@ class TextTransformUndoTest(TextTransformTestBase):
                     ],
                     [
                         (
-                            versions[0].stack[0],
+                            versions[0][0],
                             BendTextTransform(),
                         ),
                         (
-                            versions[1].stack[0],
+                            versions[1][0],
                             BendTextTransform(),
                         ),
                     ],
@@ -1657,13 +1806,7 @@ class TextTransformUndoTest(TextTransformTestBase):
                 stack.undo()
                 stack.undo()
                 self.assertEqual(
-                    [
-                        TextTransformState(
-                            item.blk.fontformat.text_transform,
-                            item.blk.fontformat.glyph_slant_angle,
-                        )
-                        for item in items
-                    ],
+                    [item.blk.fontformat.text_transform for item in items],
                     list(versions),
                 )
 
@@ -1808,6 +1951,14 @@ class TextTransformUndoTest(TextTransformTestBase):
 
 
 class TextTransformRenderingTest(TextTransformTestBase):
+    def test_item_exposes_the_export_effect_error_value(self):
+        item, _ = self._make_pair(0, TEST_LINES[0], False)
+        failure = RuntimeError('incomplete transformed export')
+
+        item.effect_renderer.export_error = failure
+
+        self.assertIs(item.export_effect_error, failure)
+
     def test_nonlinear_surface_sampling_tracks_render_quality(self):
         class IdentityMapper:
             geometry_key = ('identity',)
@@ -2179,8 +2330,8 @@ class TextTransformRenderingTest(TextTransformTestBase):
 
     def test_zero_glyph_slant_restores_effects_inside_nonlinear_stack(self):
         stack = TextTransformStack((BendTextTransform(0.55),))
-        zero = TextTransformState(stack, 0.0)
-        slanted = TextTransformState(stack, 20.0)
+        zero = TextTransformStack(stack.transforms, 0.0)
+        slanted = TextTransformStack(stack.transforms, 20.0)
         for vertical in (False, True):
             for effect in ("stroke", "shadow"):
                 with self.subTest(vertical=vertical, effect=effect):
@@ -2261,7 +2412,7 @@ class TextTransformRenderingTest(TextTransformTestBase):
                 self.assertIsNone(renderer._transformed_effect_state)
 
                 item.set_text_transform(
-                    TextTransformState(state.stack, -20.0)
+                    TextTransformStack(state.transforms, -20.0)
                 )
                 mirrored_pixels = self._render_scene(scene)
                 self.assertNotEqual(mirrored_pixels, pixels)
@@ -2363,7 +2514,7 @@ class TextTransformRenderingTest(TextTransformTestBase):
                 scene.addItem(item)
                 neutral_pixels = self._render_scene(scene)
 
-                item.set_text_transform(TextTransformState(stack))
+                item.set_text_transform(stack)
                 controller = item.geometry_controller
                 self.assertTrue(item.transform().isIdentity())
                 self.assertIsInstance(
@@ -2856,10 +3007,7 @@ class TextTransformRenderingTest(TextTransformTestBase):
                 block.vertical = vertical
                 block.angle = 17.0
                 block.translation = TEST_LINES[0]
-                block.fontformat.text_transform = FIRST_TRANSFORM.stack
-                block.fontformat.glyph_slant_angle = (
-                    FIRST_TRANSFORM.glyph_slant_angle
-                )
+                block.fontformat.text_transform = FIRST_TRANSFORM
 
                 for source in (block, copy.deepcopy(block)):
                     item = TextBlkItem(source, 0)
@@ -2916,7 +3064,7 @@ class TextTransformRenderingTest(TextTransformTestBase):
         geometry_cache = item.geometry_controller.layout_renderer.geometry_cache
         self.assertTrue(geometry_cache.persistent)
         projective_preview = transform_state(
-            FIRST_TRANSFORM.stack[0].with_value(
+            FIRST_TRANSFORM[0].with_value(
                 'horizontal_scale', 1.4
             ),
             glyph_slant_angle=FIRST_TRANSFORM.glyph_slant_angle,
@@ -2924,7 +3072,7 @@ class TextTransformRenderingTest(TextTransformTestBase):
         item.set_text_transform(projective_preview, preview=True)
         self.assertTrue(geometry_cache.persistent)
         item.clear_text_transform_preview()
-        glyph_preview = TextTransformState(FIRST_TRANSFORM.stack, 9.0)
+        glyph_preview = TextTransformStack(FIRST_TRANSFORM.transforms, 9.0)
         committed_entries = len(GLOBAL_GLYPH_GEOMETRY_CACHE)
         item.set_text_transform(glyph_preview, preview=True)
         self.assertFalse(geometry_cache.persistent)
@@ -4576,7 +4724,7 @@ class TextTransformShapeControlTest(TextTransformTestBase):
                     vertical=vertical,
                     transforms=tuple(
                         transform.transform_type
-                        for transform in state.stack
+                        for transform in state
                     ),
                 ):
                     scene = QGraphicsScene()
@@ -4656,13 +4804,13 @@ class TextTransformShapeControlTest(TextTransformTestBase):
         ):
             state = (
                 transform
-                if isinstance(transform, TextTransformState)
+                if isinstance(transform, TextTransformStack)
                 else transform_state(transform)
             )
             with self.subTest(
                 transform=(
-                    state.stack[0].transform_type
-                    if state.stack.transforms
+                    state[0].transform_type
+                    if state.transforms
                     else 'none'
                 )
             ):
@@ -4772,8 +4920,8 @@ class TextTransformShapeControlTest(TextTransformTestBase):
         for transform in (NEUTRAL, FIRST_TRANSFORM):
             with self.subTest(
                 transform=(
-                    transform.stack[0].transform_type
-                    if transform.stack.transforms
+                    transform[0].transform_type
+                    if transform.transforms
                     else 'none'
                 )
             ):

@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 from qtpy.QtWidgets import QGraphicsItem, QWidget, QGraphicsSceneHoverEvent, QGraphicsTextItem, QStyleOptionGraphicsItem, QGraphicsSceneMouseEvent
 from qtpy.QtCore import Qt, QRect, QRectF, QPoint, QPointF, Signal
@@ -11,7 +11,7 @@ from ballontranslator.utils.textblock import TextBlock
 from ballontranslator.utils.imgproc_utils import xywh2xyxypoly
 from ballontranslator.utils.fontformat import (
     FontFormat,
-    TextTransformState,
+    TextTransformStack,
     pt2px,
 )
 from ..misc import td_pattern, table_pattern
@@ -105,14 +105,11 @@ class TextBlkItem(QGraphicsTextItem):
         # Qt's source-local dirty rectangles cannot cover warped UI pixels.
         if (
             controller is not None
-            and self.is_editting()
+            and self.isEditing()
             and controller.uses_surface_warp()
         ):
             self.update()
         
-    def is_editting(self):
-        return self.textInteractionFlags() == Qt.TextInteractionFlag.TextEditorInteraction
-
     def on_content_changed(self):
         self.geometry_controller.invalidate_surface_cache()
         if (self.hasFocus() or self.is_formatting) and not self.pre_editing and not self.block_change_signal:   
@@ -171,8 +168,8 @@ class TextBlkItem(QGraphicsTextItem):
         self.effect_renderer.set_export_effect_render(enabled)
 
     @property
-    def export_effect_error(self):
-        return self.effect_renderer.export_effect_error
+    def export_effect_error(self) -> Optional[Exception]:
+        return self.effect_renderer.export_error
 
     def _update_effect_padding(self):
         return self.effect_renderer._update_effect_padding()
@@ -238,7 +235,7 @@ class TextBlkItem(QGraphicsTextItem):
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
         self.repaint_background()
 
-    def _effective_text_transform(self) -> TextTransformState:
+    def _effective_text_transform(self) -> TextTransformStack:
         return self.geometry_controller.effective()
 
     def _text_transform_is_neutral(self) -> bool:
@@ -253,7 +250,7 @@ class TextBlkItem(QGraphicsTextItem):
     def refresh_cache_policy(self) -> bool:
         """Apply the sole QGraphicsItem cache policy for live text items."""
         use_no_cache = (
-            self.is_editting()
+            self.isEditing()
             or self.geometry_controller.requires_no_cache()
         )
         cache_mode = (
@@ -269,7 +266,7 @@ class TextBlkItem(QGraphicsTextItem):
 
     def set_text_transform(
         self,
-        state: TextTransformState = None,
+        state: TextTransformStack,
         *,
         preview: bool = False,
     ) -> bool:
@@ -429,7 +426,7 @@ class TextBlkItem(QGraphicsTextItem):
 
     def setVertical(self, vertical: bool):
 
-        is_editing = self.is_editting()
+        is_editing = self.isEditing()
         preserve_selection_direction = not self._text_transform_is_neutral()
         if is_editing:
             cursor = self.textCursor()
@@ -494,7 +491,7 @@ class TextBlkItem(QGraphicsTextItem):
 
             if valid_layout:
                 layout.setMaxSize(rect.width(), rect.height())
-                controller.refresh_surface_mapper()
+                controller.refresh_compiled_geometry()
                 self.repaint_background()
         if is_editing:
             self.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -581,7 +578,7 @@ class TextBlkItem(QGraphicsTextItem):
         """Paint selection/block guides outside cached effect surfaces."""
         if (
             self._ui_guide_suppressed
-            or self.is_editting()
+            or self.isEditing()
         ):
             return
         selected = self.isSelected()
@@ -701,7 +698,7 @@ class TextBlkItem(QGraphicsTextItem):
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            if self.is_editting():
+            if self.isEditing():
                 self.geometry_controller.begin_input_mapping()
             self._old_pos = self.pos()
             self.leftbutton_pressed.emit(self.idx)
@@ -774,9 +771,6 @@ class TextBlkItem(QGraphicsTextItem):
         # persistent TextBlock owner. Canonical transform state must win when
         # producing a save/undo format snapshot.
         fontformat.text_transform = self.blk.fontformat.text_transform
-        fontformat.glyph_slant_angle = (
-            self.blk.fontformat.glyph_slant_angle
-        )
         return fontformat
 
     def set_fontformat(self, ffmat: FontFormat, set_char_format=False, set_stroke_width=True, set_effect=True):
@@ -849,12 +843,7 @@ class TextBlkItem(QGraphicsTextItem):
         self.fontformat.gradient_size = ffmat.gradient_size
         
         self.fontformat.merge(ffmat)
-        self.set_text_transform(
-            TextTransformState(
-                self.fontformat.text_transform,
-                self.fontformat.glyph_slant_angle,
-            )
-        )
+        self.set_text_transform(self.fontformat.text_transform)
 
         self.repainting = False
         if self.fontformat.gradient_enabled:

@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Iterable, List, Optional
 import os
 import os.path as osp
 import json
@@ -51,7 +51,6 @@ CONFIG_COMBOBOX_HEIGHT = 26
 CONFIG_COMBOBOX_SHORT = 180
 CONFIG_COMBOBOX_MIDEAN = 300
 CONFIG_COMBOBOX_LONG = 420
-CONFIG_MODULE_PARAM_BODY_MIN_WIDTH = 420
 
 _size2width = {
     'short': CONFIG_COMBOBOX_SHORT,
@@ -158,6 +157,32 @@ check_local_file_hash = True
 
 FONT_FAMILIES: set = None
 CUSTOM_FONTS = []
+# Windows 自带的老旧字体：渲染时可能触发 DirectWrite CreateFontFaceFromHDC 告警
+LEGACY_FONTS = frozenset({
+    "MS Sans Serif", "MS Serif", "Small Fonts",
+    "System", "Fixedsys", "Terminal",
+    "Courier", "Modern", "Roman", "Script",
+})
+
+
+def get_filtered_font_list(
+    font_list: Iterable[str],
+    excluded: Optional[Iterable[str]] = None,
+) -> List[str]:
+    """Return a sorted font list without the excluded names.
+
+    >>> get_filtered_font_list(['Times', 'Arial', 'Courier'], ['Times'])
+    ['Arial', 'Courier']
+    >>> get_filtered_font_list(['Arial', 'Times'])
+    ['Arial', 'Times']
+    """
+    excluded_set = set(excluded or ())
+    return sorted(
+        (font for font in font_list if font not in excluded_set),
+        key=str.casefold,
+    )
+
+
 pbar = {}
 runtime_widget_set = set()
 

@@ -1,5 +1,7 @@
 """Expandable controls for composable text transforms."""
 
+from typing import Sequence
+
 from qtpy.QtCore import QCoreApplication, QEvent, QSize, QTimer, Signal, Qt
 from qtpy.QtGui import QIcon
 from qtpy.QtWidgets import (
@@ -12,7 +14,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from ballontranslator.utils.fontformat import FontFormat, TextTransformState
+from ballontranslator.utils.fontformat import FontFormat, TextTransformStack
 
 from ...custom_widget import PanelArea
 from ...misc import themed_icon_path
@@ -310,15 +312,11 @@ class TextTransformPanel(PanelArea):
         if emit:
             self.transform_selected.emit(-1)
 
-    def _set_transform_states(self, states):
-        states = [
-            state
-            if isinstance(state, TextTransformState)
-            else TextTransformState(
-                state.text_transform, state.glyph_slant_angle
-            )
-            for state in states
-        ]
+    def _set_transform_states(
+        self, states: Sequence[TextTransformStack]
+    ) -> None:
+        if not all(isinstance(state, TextTransformStack) for state in states):
+            raise TypeError('transform panel requires TextTransformStack values')
         glyph_values = [state.glyph_slant_angle for state in states]
         common_glyph = (
             glyph_values[0]
@@ -329,7 +327,7 @@ class TextTransformPanel(PanelArea):
         self.glyph_slant_control.set_model_value(common_glyph, glyph_values)
 
         sequences = [
-            tuple(transform.transform_type for transform in state.stack)
+            tuple(transform.transform_type for transform in state)
             for state in states
         ]
         common_sequence = (
@@ -346,25 +344,16 @@ class TextTransformPanel(PanelArea):
         else:
             self._rebuild_transform_panels(common_sequence)
             for index, panel in enumerate(self.transform_panels):
-                panel.set_values([state.stack[index] for state in states])
+                panel.set_values([state[index] for state in states])
         self._sync_content_height()
 
-    def set_active_format(self, font_format: FontFormat):
-        self._set_transform_states([font_format])
+    def set_active_format(self, font_format: FontFormat) -> None:
+        self._set_transform_states([font_format.text_transform])
 
-    def set_transform_items(self, items):
+    def set_transform_items(self, items) -> None:
         self._set_transform_states(
-            [
-                TextTransformState(
-                    item.blk.fontformat.text_transform,
-                    item.blk.fontformat.glyph_slant_angle,
-                )
-                for item in items
-            ]
+            [item.blk.fontformat.text_transform for item in items]
         )
-
-    def set_transform(self, state):
-        self._set_transform_states([state])
 
     def iter_transform_controls(self):
         yield self.glyph_slant_control

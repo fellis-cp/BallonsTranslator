@@ -55,7 +55,7 @@ above.
 | Stage math and composite mapping | [`ui/text_engine/transforms/`](../../ballontranslator/ui/text_engine/transforms/) |
 | Variant registration and compilation policy | [`ui/text_engine/transforms/registry.py`](../../ballontranslator/ui/text_engine/transforms/registry.py) |
 | Item geometry, installed mapping, and render lifecycle | [`ui/text_engine/geometry.py`](../../ballontranslator/ui/text_engine/geometry.py) |
-| Selection-scoped preview and commit | [`ui/text_engine/transforms/editor.py`](../../ballontranslator/ui/text_engine/transforms/editor.py) |
+| Selection-scoped preview and commit | [`ui/text_engine/transforms/edit_session.py`](../../ballontranslator/ui/text_engine/transforms/edit_session.py) |
 | Panel and variant controls | [`ui/text_engine/transforms/panel.py`](../../ballontranslator/ui/text_engine/transforms/panel.py), [`ui/text_engine/transforms/controls.py`](../../ballontranslator/ui/text_engine/transforms/controls.py) |
 | Canvas undo and paired-editor coordination | [`ui/text_engine/editing/commands.py`](../../ballontranslator/ui/text_engine/editing/commands.py), [`ui/text_engine/editing/manager.py`](../../ballontranslator/ui/text_engine/editing/manager.py) |
 | Shared rubber-band and modal-event routing | [`ui/canvas.py`](../../ballontranslator/ui/canvas.py) |
@@ -71,12 +71,13 @@ variant-specific branches to `TextBlkItem` or `TextItemGeometryController`.
 `transform_type`, an exact neutral state, and runtime-only `is_nonlinear`
 capability metadata. UI controls constrain edits to their supported ranges and
 canonical precision before producing model values. The model does not clamp or
-range-validate persisted parameters. `TextTransformStack` is an immutable
-ordered tuple; neutral entries remain in model and UI state but are skipped by
-the compiler.
+range-validate persisted parameters. `TextTransformStack` is an immutable value
+containing the ordered operation tuple and Glyph Slant angle; neutral entries
+remain in model and UI state but are skipped by the compiler.
 
-`TextTransformState` combines the complete stack with `glyph_slant_angle`; undo
-must snapshot both so it restores the complete visible transform state.
+`TextTransformStack` combines the ordered global operations with the fixed
+pre-stack `glyph_slant_angle`; undo snapshots that one immutable value so it
+restores the complete visible transform state.
 Project JSON stores only this committed model data. Preview values,
 matrices, mappers, bounds, and caches are derived state and must not be
 serialized.

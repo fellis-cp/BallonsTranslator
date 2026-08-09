@@ -62,11 +62,6 @@ class CreateItemCommand(QUndoCommand):
         self.ctrl.deleteTextblkItemList([self.blk_item], [self.pairw])
 
 
-class EmptyCommand(QUndoCommand):
-    def __init__(self, parent=None):
-        super().__init__(parent=parent)
-
-
 class DeleteBlkItemsCommand(QUndoCommand):
     def __init__(self, blk_list: List[TextBlkItem], mode: int, ctrl, parent=None):
         super().__init__(parent)
@@ -583,7 +578,7 @@ class SceneTextManager(QObject):
 
     def onTextBlkItemBeginEdit(self, blk_id: int):
         blk_item = self.textblk_item_list[blk_id]
-        self.formatpanel.text_transform_editor.select_transform(-1)
+        self.formatpanel.text_transform_session.select_transform(-1)
         self.txtblkShapeControl.setBlkItem(blk_item)
         self.canvas.editing_textblkitem = blk_item
         self.formatpanel.set_textblk_item(blk_item)
@@ -627,9 +622,9 @@ class SceneTextManager(QObject):
             return self.canvas.editing_textblkitem
         return None
 
-    def is_editting(self):
+    def is_editting(self) -> bool:
         blk_item = self.txtblkShapeControl.blk_item
-        return blk_item is not None and blk_item.is_editting()
+        return blk_item is not None and blk_item.isEditing()
 
     def onTextBlkItemHoverEnter(self, blk_id: int):
         if self.is_editting():
