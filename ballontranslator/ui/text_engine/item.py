@@ -272,13 +272,16 @@ class TextBlkItem(QGraphicsTextItem):
     ) -> bool:
         effective_before = self.geometry_controller.effective()
         changed = self.geometry_controller.set(state, preview=preview)
-        if changed and self.geometry_controller.effective() != effective_before:
+        # A neutral Grid division edit changes controller topology without
+        # changing the compiled text geometry or requiring a full repaint.
+        if self.geometry_controller.effective() != effective_before:
             self.visual_geometry_changed.emit()
         return changed
 
     def clear_text_transform_preview(self) -> bool:
+        effective_before = self.geometry_controller.effective()
         changed = self.geometry_controller.clear_preview()
-        if changed:
+        if self.geometry_controller.effective() != effective_before:
             self.visual_geometry_changed.emit()
         return changed
 
@@ -842,8 +845,10 @@ class TextBlkItem(QGraphicsTextItem):
         self.fontformat.gradient_angle = ffmat.gradient_angle
         self.fontformat.gradient_size = ffmat.gradient_size
         
+        # Apply while the canonical model still contains the previous
+        # transform; merging first would skip live geometry recompilation.
+        self.set_text_transform(ffmat.text_transform)
         self.fontformat.merge(ffmat)
-        self.set_text_transform(self.fontformat.text_transform)
 
         self.repainting = False
         if self.fontformat.gradient_enabled:
