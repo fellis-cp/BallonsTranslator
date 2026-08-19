@@ -437,7 +437,8 @@ class TranslationTask:
         source_lang: str,
         needs_refresh: bool = False,
         timeout: int = 120,
-        mode: str = "Batch"
+        mode: str = "Batch",
+        interval: int = 1
     ):
         self.src_list = src_list
         self.target_lang = target_lang
@@ -446,6 +447,7 @@ class TranslationTask:
         self.needs_refresh = needs_refresh
         self.timeout = timeout
         self.mode = mode
+        self.interval = interval
         self.result: Optional[List[str]] = None
         self.done_event = threading.Event()
 
@@ -494,7 +496,7 @@ class GeminiBrowserWorker(threading.Thread):
                         
                         if task.result:
                             logger.info(f"Instance {self.instance_id}: Task completed successfully.")
-                            time.sleep(1) 
+                            time.sleep(task.interval) 
                         else:
                             logger.warning(f"Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
                             time.sleep(5)
@@ -839,7 +841,7 @@ class DeepSeekBrowserWorker(threading.Thread):
                         
                         if task.result:
                             logger.info(f"DeepSeek Instance {self.instance_id}: Task completed successfully.")
-                            time.sleep(1)
+                            time.sleep(task.interval)
                         else:
                             logger.warning(f"DeepSeek Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
                             time.sleep(5)
@@ -1246,7 +1248,7 @@ class DeepLBrowserWorker(threading.Thread):
                         
                         if task.result:
                             logger.info(f"DeepL Instance {self.instance_id}: Task completed successfully.")
-                            time.sleep(1)
+                            time.sleep(task.interval)
                         else:
                             logger.warning(f"DeepL Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
                             time.sleep(5)
@@ -1488,7 +1490,7 @@ class NoTrackBrowserWorker(threading.Thread):
                         
                         if task.result:
                             logger.info(f"NoTrack Instance {self.instance_id}: Task completed successfully.")
-                            time.sleep(1) 
+                            time.sleep(task.interval) 
                         else:
                             logger.warning(f"NoTrack Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
                             time.sleep(5)
@@ -1786,6 +1788,11 @@ class TransGemini(BaseTranslator):
             "value": 120,
             "display_name": "Timeout (seconds)",
             "description": "Maximum base timeout in seconds for translation batch to complete."
+        },
+        "interval": {
+            "value": 1,
+            "display_name": "Interval (seconds)",
+            "description": "Interval time (in seconds) between translation operations."
         }
     }
 
@@ -1930,6 +1937,14 @@ class TransGemini(BaseTranslator):
         except (ValueError, TypeError):
             configured_timeout = 120
 
+        configured_interval = self.get_param_value("interval")
+        if isinstance(configured_interval, dict):
+            configured_interval = configured_interval.get("value", 1)
+        try:
+            configured_interval = int(configured_interval)
+        except (ValueError, TypeError):
+            configured_interval = 1
+
         calc_timeout = _calculate_timeout(src_list, base_timeout=configured_timeout)
 
         mode = self.mode
@@ -1943,7 +1958,11 @@ class TransGemini(BaseTranslator):
             if needs_refresh:
                 logger.warning(f"Instance {self.instance_id} ({self.provider}): [TIMEOUT/FAIL] Retrying ({attempt}/{max_retries})...")
 
-            task = TranslationTask(src_list, target, custom_prompt, source, needs_refresh=needs_refresh, timeout=calc_timeout, mode=mode)
+            task = TranslationTask(
+                src_list, target, custom_prompt, source,
+                needs_refresh=needs_refresh, timeout=calc_timeout, mode=mode,
+                interval=configured_interval
+            )
             self.worker.task_queue.put(task)
             
             wait_timeout = calc_timeout + 30
