@@ -1443,6 +1443,312 @@ class DeepLBrowserWorker(threading.Thread):
             logger.error(f"DeepL Sequential Translation Error: {e}")
             return None
 
+# --- NoTrack Browser Worker ---
+
+class NoTrackBrowserWorker(threading.Thread):
+    """
+    Worker automating the NoTrack AI interface (https://notrack.ai/chat) to perform translations.
+    """
+    def __init__(self, profile_dir: str, instance_id: int, repair_worker: Optional[JsonRepairWorker] = None):
+        super().__init__(daemon=True, name=f"NoTrackWorker-{instance_id}")
+        self.profile_dir = profile_dir
+        self.instance_id = instance_id
+        self.repair_worker = repair_worker
+        self.task_queue = queue.Queue()
+        self.running = True
+
+    def run(self):
+        try:
+            import subprocess
+            logger.info(f"NoTrack Instance {self.instance_id}: Installing/checking Playwright Chromium...")
+            try:
+                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+            except Exception as e:
+                logger.error(f"NoTrack Instance {self.instance_id}: Failed to run playwright install chromium: {e}")
+            with sync_playwright() as p:
+                logger.info(f"NoTrack Instance {self.instance_id}: Launching Browser...")
+                browser = p.chromium.launch_persistent_context(
+                    user_data_dir=self.profile_dir,
+                    channel="chrome",
+                    headless=False,
+                    args=["--disable-blink-features=AutomationControlled"]
+                )
+                page = browser.pages[0]
+                self._safe_goto(page, "https://notrack.ai/chat", wait_extra=True)
+
+                while self.running:
+                    task = None
+                    try:
+                        task = self.task_queue.get(timeout=1)
+                        if task.needs_refresh:
+                            logger.info(f"NoTrack Instance {self.instance_id}: Refreshing page...")
+                            self._safe_goto(page, "https://notrack.ai/chat", wait_extra=True)
+                        
+                        task.result = self._do_translate(page, task)
+                        
+                        if task.result:
+                            logger.info(f"NoTrack Instance {self.instance_id}: Task completed successfully.")
+                            time.sleep(1) 
+                        else:
+                            logger.warning(f"NoTrack Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
+                            time.sleep(5)
+                    except queue.Empty:
+                        continue
+                    except Exception as e:
+                        logger.error(f"NoTrack Instance {self.instance_id}: Worker loop error: {e}")
+                    finally:
+                        if task is not None:
+                            self.task_queue.task_done()
+                            task.done_event.set()
+                
+                browser.close()
+        except Exception as e:
+            logger.critical(f"NoTrack Instance {self.instance_id}: Fatal Error: {e}")
+        finally:
+            self.running = False
+
+    def _safe_goto(self, page, url: str, wait_extra: bool = False):
+        try:
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            page.wait_for_selector("textarea#field", timeout=30000)
+            if wait_extra:
+                time.sleep(1)
+        except Exception as e:
+            logger.warning(f"NoTrack Instance {self.instance_id}: Navigation failed ({e}). Reloading...")
+            try:
+                page.reload()
+                time.sleep(5)
+            except Exception as reload_err:
+                logger.debug(f"NoTrack Instance {self.instance_id}: Reload also failed: {reload_err}")
+
+    def _do_translate(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if task.mode == "Sequential":
+            return self._do_translate_sequential(page, task)
+        return self._do_translate_batch(page, task)
+
+    def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
+        input_sel = "textarea#field"
+        try:
+            page.wait_for_selector(input_sel, timeout=15000)
+            batch_token = f"BTCH_{uuid.uuid4().hex[:6]}"
+            
+            input_elements = []
+            current_global_id = 1
+            for text in task.src_list:
+                parts = text.split('##')
+                for part in parts:
+                    input_elements.append({"id": current_global_id, "text": part.strip()})
+                    current_global_id += 1
+            
+            input_json_str = json.dumps(input_elements, ensure_ascii=False)
+            
+            prompt_parts = []
+            prompt_parts.extend([
+                f"IDENTIFIER: {batch_token}",
+                f"TASK: Translate from {task.source_lang} to {task.target_lang}.",
+                "FORMAT: Respond ONLY with a valid JSON object. No prose.",
+                f'SCHEMA: {{"batch_id": "{batch_token}", "translations": [{{"id": number, "translation": "string"}}]}}',
+                f"INPUT:\n{input_json_str}"
+            ])
+            if task.custom_prompt:
+                prompt_parts.insert(2, f"INSTRUCTION: {task.custom_prompt}")
+
+            full_prompt = "\n".join(prompt_parts)
+
+            logger.info("-" * 50)
+            logger.info(f"NoTrack Instance {self.instance_id}: [SENDING_DATA] Batch: {batch_token}")
+            logger.info(f"Input Count: {len(input_elements)} items")
+            logger.info("-" * 50)
+
+            page.click(input_sel)
+            time.sleep(0.5)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.insert_text(full_prompt)
+            time.sleep(1)
+            page.keyboard.press("Enter")
+
+            start_wait = time.time()
+            last_length = 0
+            last_growth_time = time.time()
+            max_poll_time = max(task.timeout, _calculate_timeout(task.src_list, base_timeout=task.timeout))
+            stable_threshold_s = 1.0
+            no_growth_timeout = 30.0
+            
+            logger.info(f"NoTrack Instance {self.instance_id}: Waiting for response (Max {max_poll_time}s)...")
+
+            while (time.time() - start_wait) < max_poll_time:
+                time.sleep(0.3) 
+                responses = page.query_selector_all(".row:not(.usr) .bubble")
+                if not responses:
+                    continue
+                
+                current_text = responses[-1].inner_text()
+                current_length = len(current_text)
+                
+                if batch_token in current_text:
+                    raw_json = _extract_json_block(current_text)
+                    if raw_json:
+                        data = _parse_or_repair_json(raw_json, self.instance_id)
+                        if data and "translations" in data and len(data["translations"]) == len(input_elements):
+                            logger.info(f"NoTrack Instance {self.instance_id}: [FAST-RESULT] Complete valid response received.")
+                            return _build_results(task.src_list, data["translations"])
+
+                if current_length > last_length:
+                    logger.info(f"NoTrack Instance {self.instance_id}: NoTrack is typing... ({current_length} chars)")
+                    last_length = current_length
+                    last_growth_time = time.time()
+                    continue
+
+                wall_stable = time.time() - last_growth_time
+                if current_length > 0 and wall_stable > no_growth_timeout and batch_token not in current_text:
+                    logger.warning(f"NoTrack Instance {self.instance_id}: Response stalled for {wall_stable:.1f}s without batch token.")
+                    break
+
+                if wall_stable < stable_threshold_s or current_length == 0:
+                    continue
+
+                if batch_token not in current_text:
+                    continue
+
+                logger.info(f"NoTrack Instance {self.instance_id}: [STABLE] Analyzing JSON...")
+
+                raw_json = _extract_json_block(current_text)
+                if not raw_json:
+                    continue
+
+                data = _parse_or_repair_json(raw_json, self.instance_id)
+                if data is None and self.repair_worker:
+                    logger.info(f"NoTrack Instance {self.instance_id}: Dispatching to JsonRepairWorker...")
+                    repair_task = RepairTask(raw_json, expected_count=len(input_elements), batch_token=batch_token)
+                    self.repair_worker.task_queue.put(repair_task)
+                    if repair_task.done_event.wait(timeout=10) and repair_task.result:
+                        data = repair_task.result
+
+                if data is None:
+                    logger.warning(f"NoTrack Instance {self.instance_id}: JSON parse/repair failed.")
+                    return None
+
+                translations = data.get("translations", [])
+                logger.info(f"NoTrack Instance {self.instance_id}: [RESULT] Received {len(translations)} items.")
+                return _build_results(task.src_list, translations)
+            
+            logger.error(f"NoTrack Instance {self.instance_id}: [TIMEOUT] No stable response in {max_poll_time}s")
+            return None
+        except Exception as e:
+            logger.error(f"NoTrack Instance {self.instance_id}: [LOGIC_ERROR] {e}")
+            return None
+
+    def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
+        input_sel = "textarea#field"
+        try:
+            page.wait_for_selector(input_sel, timeout=15000)
+
+            input_elements = []
+            current_global_id = 1
+            for text in task.src_list:
+                parts = text.split('##')
+                for part in parts:
+                    input_elements.append({"id": current_global_id, "text": part.strip()})
+                    current_global_id += 1
+
+            logger.info("-" * 50)
+            logger.info(f"NoTrack Instance {self.instance_id}: [SENDING_DATA_SEQUENTIAL] Total items: {len(input_elements)}")
+            logger.info("-" * 50)
+
+            collected_translations: List[dict] = []
+
+            for elem in input_elements:
+                item_id = elem["id"]
+                item_text = elem["text"]
+
+                if not item_text:
+                    collected_translations.append({"id": item_id, "translation": ""})
+                    continue
+
+                item_token = f"ID_{item_id}_{uuid.uuid4().hex[:4]}"
+                item_json = json.dumps([elem], ensure_ascii=False)
+
+                prompt_parts = [
+                    f"IDENTIFIER: {item_token}",
+                    f"TASK: Translate from {task.source_lang} to {task.target_lang}.",
+                    "FORMAT: Respond ONLY with a valid JSON object. No prose.",
+                    f'SCHEMA: {{"batch_id": "{item_token}", "translations": [{{"id": {item_id}, "translation": "string"}}]}}',
+                    f"INPUT:\n{item_json}"
+                ]
+                if task.custom_prompt:
+                    prompt_parts.insert(2, f"INSTRUCTION: {task.custom_prompt}")
+
+                full_prompt = "\n".join(prompt_parts)
+
+                logger.info(f"NoTrack Instance {self.instance_id}: [ITEM {item_id}/{len(input_elements)}] Token: {item_token}")
+
+                page.click(input_sel)
+                time.sleep(0.3)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.insert_text(full_prompt)
+                time.sleep(0.5)
+                page.keyboard.press("Enter")
+
+                start_wait = time.time()
+                last_length = 0
+                last_growth_time = time.time()
+                item_timeout = min(45, task.timeout)
+                item_trans = None
+
+                while (time.time() - start_wait) < item_timeout:
+                    time.sleep(0.3)
+                    responses = page.query_selector_all(".row:not(.usr) .bubble")
+                    if not responses:
+                        continue
+
+                    current_text = responses[-1].inner_text()
+                    current_length = len(current_text)
+
+                    if item_token in current_text:
+                        raw_json = _extract_json_block(current_text)
+                        if raw_json:
+                            data = _parse_or_repair_json(raw_json, self.instance_id)
+                            if data and "translations" in data and len(data["translations"]) > 0:
+                                item_trans = data["translations"][0].get("translation", "")
+                                break
+
+                    if current_length > last_length:
+                        last_length = current_length
+                        last_growth_time = time.time()
+                        continue
+
+                    wall_stable = time.time() - last_growth_time
+                    if current_length > 0 and wall_stable > 15.0 and item_token not in current_text:
+                        logger.warning(f"NoTrack Instance {self.instance_id}: Response stalled for item {item_id}.")
+                        break
+
+                    if wall_stable < 0.8 or current_length == 0:
+                        continue
+
+                    if item_token not in current_text:
+                        continue
+
+                    raw_json = _extract_json_block(current_text)
+                    if raw_json:
+                        data = _parse_or_repair_json(raw_json, self.instance_id)
+                        if data and "translations" in data and len(data["translations"]) > 0:
+                            item_trans = data["translations"][0].get("translation", "")
+                            break
+
+                if item_trans is not None:
+                    collected_translations.append({"id": item_id, "translation": item_trans})
+                else:
+                    logger.warning(f"NoTrack Instance {self.instance_id}: Item {item_id} failed or timed out. Preserving original.")
+                    collected_translations.append({"id": item_id, "translation": item_text})
+
+            return _build_results(task.src_list, collected_translations)
+
+        except Exception as e:
+            logger.error(f"NoTrack Instance {self.instance_id}: [LOGIC_ERROR_SEQUENTIAL] {e}")
+            return None
+
 # --- Translator Registration ---
 
 @register_translator("Gemini Playwright")
@@ -1462,7 +1768,7 @@ class TransGemini(BaseTranslator):
     params: Dict = {
         "provider": {
             "type": "selector",
-            "options": ["Gemini", "DeepSeek", "DeepL"],
+            "options": ["Gemini", "DeepSeek", "DeepL", "NoTrack"],
             "value": "Gemini",
             "description": "Select the browser automation provider.",
         },
@@ -1571,6 +1877,8 @@ class TransGemini(BaseTranslator):
                 worker_provider = "DeepSeek"
             elif "DeepL" in type(self.worker).__name__:
                 worker_provider = "DeepL"
+            elif "NoTrack" in type(self.worker).__name__:
+                worker_provider = "NoTrack"
             
             if worker_provider != active_provider:
                 logger.info(f"Stopping worker for {worker_provider} to switch to {active_provider}")
@@ -1590,6 +1898,8 @@ class TransGemini(BaseTranslator):
             self.worker = DeepSeekBrowserWorker(self.profile_path, self.instance_id, repair_worker=self.repair_worker)
         elif active_provider == "DeepL":
             self.worker = DeepLBrowserWorker(self.profile_path, self.instance_id)
+        elif active_provider == "NoTrack":
+            self.worker = NoTrackBrowserWorker(self.profile_path, self.instance_id, repair_worker=self.repair_worker)
         else:
             self.worker = GeminiBrowserWorker(self.profile_path, self.instance_id, repair_worker=self.repair_worker)
             
