@@ -74,6 +74,9 @@ os.environ['NUMBA_CACHE_DIR'] = osp.join(shared.cache_dir, 'numba')
 
 PATH_ROOT = Path(shared.PROGRAM_PATH)
 PATH_FONTS = str(PATH_ROOT / 'fonts')
+PATH_FONT_REGISTRY_OVERRIDES = (
+    PATH_ROOT / 'config' / 'font_registry_overrides.json'
+)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--proj-dir", default='', type=str, help='Open project directory on startup')
@@ -309,13 +312,20 @@ def main():
         LOGGER.warning(f'target display language file {langp} doesnt exist.')
     LOGGER.info(f'set display language to {lang}')
 
-    # Fonts
-    # Load custom fonts if they exist
+    # Capture system families before registering bundled fonts so the runtime
+    # registry can keep both sources separate.
+    if shared.FLAG_QT6:
+        font_database = QFontDatabase
+    else:
+        font_database = QFontDatabase()
+    system_families = sorted(font_database.families(), key=str.casefold)
+    font_paths = []
     if osp.exists(PATH_FONTS):
-        for fp in find_all_files_recursive(PATH_FONTS, FONT_EXTS):
-            fnt_idx = QFontDatabase.addApplicationFont(fp)
-            if fnt_idx >= 0:
-                shared.CUSTOM_FONTS.append(QFontDatabase.applicationFontFamilies(fnt_idx)[0])
+        # Qt can reject relative application-font paths on macOS.
+        font_paths = [
+            str(Path(path).resolve())
+            for path in find_all_files_recursive(PATH_FONTS, FONT_EXTS)
+        ]
 
     if sys.platform == 'win32' and args.headless:
         # font database does not initialise on windows with qpa -offscreen:
@@ -325,13 +335,35 @@ def main():
         for fd in font_dir_list:
             fp_list = find_all_files_recursive(fd, FONT_EXTS)
             for fp in fp_list:
-                fnt_idx = QFontDatabase.addApplicationFont(fp)
+                QFontDatabase.addApplicationFont(str(Path(fp).resolve()))
+        system_families = sorted(font_database.families(), key=str.casefold)
 
-    if shared.FLAG_QT6:
-        shared.FONT_FAMILIES = set(f for f in QFontDatabase.families())
-    else:
-        fdb = QFontDatabase()
-        shared.FONT_FAMILIES = set(fdb.families())
+    from ballontranslator.utils.font_registry import build_font_registry
+    shared.FONT_REGISTRY = build_font_registry(
+        font_database,
+        font_paths,
+        system_families,
+        locale=lang,
+        font_registry_path=(
+            str(PATH_FONT_REGISTRY_OVERRIDES)
+            if PATH_FONT_REGISTRY_OVERRIDES.exists()
+            else None
+        ),
+    )
+    shared.FONT_FAMILIES = set(font_database.families())
+
+    from ballontranslator.ui.text_engine.font_family import (
+        register_qt_font_family_aliases,
+    )
+    font_aliases = register_qt_font_family_aliases(
+        font_database.families(),
+        font_database.styles,
+    )
+    if font_aliases:
+        LOGGER.info(
+            'Registered Qt-safe aliases for %d font families.',
+            len(font_aliases),
+        )
 
     app_font = QFont('Microsoft YaHei UI')
     if not app_font.exactMatch() or sys.platform == 'darwin':

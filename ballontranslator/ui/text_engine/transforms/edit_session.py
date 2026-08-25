@@ -1,6 +1,5 @@
 """Selection-scoped edit sessions for composable text transforms."""
 
-import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -18,6 +17,7 @@ from ..editing.commands import SetTextTransformCommand
 
 if TYPE_CHECKING:
     from ..formatting.panel import FontFormatPanel
+    from ..item import TextBlkItem
     from .panel import TextTransformPanel
 
 
@@ -283,6 +283,16 @@ class TextTransformEditSession:
             self.controls.clear_transform_selection(emit=False)
         else:
             self.controls.select_transform(new_index, emit=False)
+
+    def activate_last_projective(self, item: "TextBlkItem") -> None:
+        if len(self.items) != 1 or self.items[0] is not item:
+            return
+        state = self._state_for_item(item)
+        for index in range(len(state) - 1, -1, -1):
+            if isinstance(state[index], ProjectiveTextTransform):
+                self.select_transform(index)
+                return
+        self.add_transform('projective')
 
     def remove_transform(self, index: int) -> None:
         self._prepare_structure_change()
@@ -585,7 +595,11 @@ class TextTransformEditSession:
     def detach_scene_owner(self) -> None:
         host = self.host
         if host.textblk_item is not None:
-            host.textblk_item.fontformat = copy.deepcopy(C.active_format)
+            # Keep the TextBlock and live layout attached to their canonical
+            # format object when the panel returns to its global owner.
+            letter_spacing = host.textblk_item.fontformat.letter_spacing
+            host.textblk_item.fontformat.merge(C.active_format)
+            host.textblk_item.fontformat.letter_spacing = letter_spacing
         host.textblk_item = None
         self.items = []
         self.selected_index = None

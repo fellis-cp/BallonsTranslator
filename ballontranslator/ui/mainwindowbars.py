@@ -428,11 +428,15 @@ class TitleBar(Widget):
         batchTranslateUntranslatedAction = QAction(self.tr('Scan & Translate Untranslated (Playwright)'), self)
         self.batch_translate_untranslated_trigger = batchTranslateUntranslatedAction.triggered
         
+        self.path_reorder_action = QAction(self.tr('Path Reorder'), self)
+        self.path_reorder_action.setCheckable(True)
+        self.path_reorder_trigger = self.path_reorder_action.triggered
         fontExclusionAction = QAction(self.tr('Font Exclusion'), self)
         self.font_exclusion_trigger = fontExclusionAction.triggered
         
         toolsMenu = QMenu(self.toolsToolBtn)
         toolsMenu.addAction(mergeToolAction)
+        toolsMenu.addAction(self.path_reorder_action)
         toolsMenu.addSeparator()
         toolsMenu.addAction(batchTranslateUntranslatedAction)
         toolsMenu.addAction(fontExclusionAction)

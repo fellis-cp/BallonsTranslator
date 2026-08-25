@@ -1,6 +1,6 @@
 import os.path as osp
 import os, re, traceback, sys
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 from pathlib import Path
 import subprocess
 from functools import partial
@@ -50,6 +50,10 @@ from .custom_widget import Widget, ViewWidget
 from .global_search_widget import GlobalSearchWidget
 from .text_engine.editing.commands import GlobalRepalceAllCommand
 from .text_engine.transforms.grid import start_grid_numba_warmup
+from .text_engine.pipeline_formatting import (
+    AutoTateChuYokoThread,
+    apply_auto_tate_chu_yoko,
+)
 from .framelesswindow import FramelessWindow, FramelessMoveResize
 from .drawing_commands import RunBlkTransCommand
 from .keywordsubwidget import KeywordSubWidget
@@ -170,6 +174,24 @@ class MainWindow(mainwindow_cls):
         self.update_thread.update_failed.connect(self.on_update_failed)
         self.update_progress_msgbox = ProgressMessageBox(self.tr('Updating: '), False, self)
         self._update_progress_visible = False
+        self.auto_tate_chu_yoko_thread = AutoTateChuYokoThread(self)
+        self.auto_tate_chu_yoko_progress = ProgressMessageBox(
+            '',
+            True,
+            self,
+        )
+        self.auto_tate_chu_yoko_thread.progress_changed.connect(
+            self.auto_tate_chu_yoko_progress.updateTaskProgress
+        )
+        self.auto_tate_chu_yoko_thread.processing_finished.connect(
+            self.on_auto_tate_chu_yoko_processing_finished
+        )
+        self.auto_tate_chu_yoko_progress.stop_clicked.connect(
+            self.auto_tate_chu_yoko_thread.request_stop
+        )
+        self.auto_tate_chu_yoko_progress.showed.connect(
+            self.on_imgtrans_progressbox_showed
+        )
 
     def resetStyleSheet(self):
         theme = 'eva-dark' if pcfg.darkmode else 'eva-light'
@@ -481,8 +503,13 @@ class MainWindow(mainwindow_cls):
         self.configPanel.check_update.connect(self.check_for_updates)
         self.configPanel.reload_textstyle.connect(self.load_textstyle_from_proj_dir)
         self.configPanel.font_list_changed.connect(self.on_show_only_custom_font)
-        if pcfg.let_show_only_custom_fonts_flag or pcfg.excluded_fonts:
-            self.on_show_only_custom_font(pcfg.let_show_only_custom_fonts_flag)
+        self.configPanel.compact_vertical_punctuation_changed.connect(
+            self.st_manager.refresh_vertical_layouts
+        )
+        self.configPanel.apply_auto_tate_chu_yoko_requested.connect(
+            self.apply_auto_tate_chu_yoko_to_project
+        )
+        self.on_show_only_custom_font(pcfg.let_show_only_custom_fonts_flag)
 
         textblock_mode = pcfg.imgtrans_textblock
         if pcfg.imgtrans_textedit:
@@ -659,12 +686,9 @@ class MainWindow(mainwindow_cls):
             save_text_styles()
 
     def on_show_only_custom_font(self, only_custom: bool) -> None:
-        if only_custom:
-            font_list = shared.CUSTOM_FONTS
-        else:
-            font_list = shared.FONT_FAMILIES
-        font_list = shared.get_filtered_font_list(font_list, pcfg.excluded_fonts)
-        self.textPanel.formatpanel.familybox.update_font_list(font_list)
+        registry = shared.FONT_REGISTRY
+        entries = registry.entries(only_custom, pcfg.excluded_fonts)
+        self.textPanel.formatpanel.update_font_entries(entries)
 
     def openDir(self, directory: str):
         try:
@@ -760,6 +784,9 @@ class MainWindow(mainwindow_cls):
         # Pending numeric edits are not dirty until they commit. Resolve them
         # before the close-time dirty check and final config snapshot.
         self.st_manager.formatpanel.resolve_text_transform_edits_for_save()
+        if self.auto_tate_chu_yoko_thread.isRunning():
+            self.auto_tate_chu_yoko_thread.request_stop()
+            self.auto_tate_chu_yoko_thread.wait()
         if not self.imgtrans_proj.is_empty:
             self.conditional_save(keep_exist_as_backup=True)
         while True:
@@ -848,6 +875,10 @@ class MainWindow(mainwindow_cls):
         self.titleBar.darkmode_trigger.connect(self.on_darkmode_triggered)
         self.titleBar.merge_tool_trigger.connect(self.on_open_merge_tool)
         self.titleBar.batch_translate_untranslated_trigger.connect(self.on_batch_translate_untranslated)
+        self.titleBar.path_reorder_trigger.connect(self.on_path_reorder)
+        self.canvas.path_reorder_mode_changed.connect(
+            self.titleBar.path_reorder_action.setChecked
+        )
         self.titleBar.font_exclusion_trigger.connect(
             self.configPanel.show_font_exclusion_dialog
         )
@@ -884,6 +915,10 @@ class MainWindow(mainwindow_cls):
         shortcutItalic.activated.connect(self.shortcutItalic)
         shortcutUnderline = QShortcut(QKeySequence.StandardKey.Underline, self)
         shortcutUnderline.activated.connect(self.shortcutUnderline)
+        shortcutCapitalize = QShortcut(QKeySequence("Ctrl+Q"), self)
+        shortcutCapitalize.activated.connect(
+            self.st_manager.capitalize_selected_textitems
+        )
 
         shortcutDelete = QShortcut(QKeySequence.StandardKey.Delete, self)
         shortcutDelete.activated.connect(self.shortcutDelete)
@@ -973,7 +1008,7 @@ class MainWindow(mainwindow_cls):
 
     def shortcutBold(self):
         if self.textPanel.formatpanel.isVisible():
-            self.textPanel.formatpanel.formatBtnGroup.boldBtn.click()
+            self.textPanel.formatpanel.toggle_bold()
 
     def shortcutDelete(self):
         if self.canvas.gv.isVisible():
@@ -995,8 +1030,9 @@ class MainWindow(mainwindow_cls):
         self.st_manager.formatpanel.resolve_text_transform_edits_for_history_change()
         self.canvas.undo()
 
-    def on_page_search(self):
+    def on_page_search(self) -> None:
         if self.canvas.gv.isVisible():
+            self.canvas.cancel_path_reorder()
             fo = self.app.focusObject()
             sel_text = ''
             tgt_edit = None
@@ -1106,6 +1142,25 @@ class MainWindow(mainwindow_cls):
             self.merge_dialog.activateWindow()
         else:
             self.merge_dialog.show()
+
+    def on_path_reorder(self, checked: bool) -> None:
+        if not checked:
+            self.canvas.cancel_path_reorder()
+            return
+        if (
+            self.centralStackWidget.currentIndex() != 0
+            or len(self.st_manager.textblk_item_list) < 2
+        ):
+            self.titleBar.path_reorder_action.setChecked(False)
+            return
+
+        if not self.bottomBar.texteditChecker.isChecked():
+            self.bottomBar.texteditChecker.click()
+        editing_item = self.canvas.editing_textblkitem
+        if editing_item is not None and editing_item.isEditing():
+            editing_item.endEdit(keep_focus=False)
+        if not self.canvas.start_path_reorder():
+            self.titleBar.path_reorder_action.setChecked(False)
 
     def run_merge_task(self, on_current=False):
         """执行区域合并任务"""
@@ -1293,6 +1348,9 @@ class MainWindow(mainwindow_cls):
         edit.setTextCursor(cursor)
 
     def shortcutEscape(self):
+        if self.canvas.path_reorder_active:
+            self.canvas.cancel_path_reorder()
+            return
         if self.canvas.handle_transform_modal_shortcut(QKEY.Key_Escape):
             return
         if self.canvas.search_widget.isVisible():
@@ -1611,17 +1669,13 @@ class MainWindow(mainwindow_cls):
         
         self.global_search_widget.set_document_edited()
         
-        im_h, im_w = tgt_img.shape[:2]
-
         blk_list, blk_ids = [], []
         for blkitem in blkitem_list:
             blk: TextBlock = blkitem.blk
-            blk._bounding_rect = blkitem.absBoundingRect()
             blk.text = self.st_manager.pairwidget_list[
                 blkitem.idx
             ].e_source.toPlainText()
             blk_ids.append(blkitem.idx)
-            blk.set_lines_by_xywh(blk._bounding_rect, angle=-blk.angle, x_range=[0, im_w-1], y_range=[0, im_h-1], adjust_bbox=True)
             blk_list.append(blk)
 
         page_key = self.imgtrans_proj.current_img
@@ -1701,18 +1755,21 @@ class MainWindow(mainwindow_cls):
                         blk.set_font_colors(fg_colors=gf.frgb)
                     if override_fnt_scolor:
                         blk.set_font_colors(bg_colors=gf.srgb)
+                    if override_writing_mode:
+                        blk.vertical = gf.vertical
                     if override_alignment:
                         blk.alignment = gf.alignment
-                    elif enable_detect and not blk.src_is_vertical:
-                        blk.recalulate_alignment()
+                    elif enable_detect:
+                        if blk.vertical:
+                            blk.alignment = TextAlignment.Center
+                        elif not blk.src_is_vertical:
+                            blk.recalulate_alignment()
                     if override_effect:
                         blk.opacity = gf.opacity
                         blk.shadow_color = gf.shadow_color
                         blk.shadow_radius = gf.shadow_radius
                         blk.shadow_strength = gf.shadow_strength
                         blk.shadow_offset = gf.shadow_offset
-                    if override_writing_mode:
-                        blk.vertical = gf.vertical
                     if override_font_family or blk.font_family is None:
                         blk.font_family = gf.font_family
                         if blk.rich_text:
@@ -1721,14 +1778,29 @@ class MainWindow(mainwindow_cls):
                     blk.line_spacing = gf.line_spacing
                     blk.letter_spacing = gf.letter_spacing
                     blk.italic = gf.italic
-                    blk.bold = gf.bold
+                    blk.font_weight = gf.font_weight
                     blk.underline = gf.underline
+                    blk.fontformat.standard_vertical_roman_alignment = (
+                        gf.standard_vertical_roman_alignment
+                    )
                     sw = blk.stroke_width
                     if sw > 0 and enable_ocr and enable_detect and not override_fnt_size:
                         blk.font_size = blk.font_size / (1 + sw)
 
                     # Apply the complete global text-transform stack.
                     blk.fontformat.text_transform = gf.text_transform
+
+            if pcfg.auto_tate_chu_yoko.enabled and (
+                enable_translate
+                or (
+                    self._render_only
+                    and not self._run_imgtrans_wo_textstyle_update
+                )
+            ):
+                apply_auto_tate_chu_yoko(
+                    blk_list,
+                    pcfg.auto_tate_chu_yoko,
+                )
 
             self.st_manager.auto_textlayout_flag = pcfg.let_autolayout_flag and \
                 (enable_detect or enable_translate)
@@ -1775,6 +1847,37 @@ class MainWindow(mainwindow_cls):
         for blk in blkitem_list:
             pairw_list.append(self.st_manager.pairwidget_list[blk.idx])
         self.canvas.push_undo_command(RunBlkTransCommand(self.canvas, blkitem_list, pairw_list, mode))
+
+    def apply_auto_tate_chu_yoko_to_project(self) -> None:
+        if (
+            self.imgtrans_proj.is_empty
+            or self.auto_tate_chu_yoko_thread.isRunning()
+        ):
+            return
+
+        # Capture live edits before the worker mutates the project documents.
+        self.st_manager.updateTextBlkList()
+        self.auto_tate_chu_yoko_progress.zero_progress()
+        if self.auto_tate_chu_yoko_thread.start_processing(
+            self.imgtrans_proj.pages,
+            pcfg.auto_tate_chu_yoko,
+        ):
+            self.auto_tate_chu_yoko_progress.show_fitted()
+
+    def on_auto_tate_chu_yoko_processing_finished(
+        self,
+        changed_count: int,
+        changed_blocks: Tuple[TextBlock, ...],
+    ) -> None:
+        self.auto_tate_chu_yoko_progress.hide()
+        if not changed_count:
+            return
+
+        changed_ids = {id(block) for block in changed_blocks}
+        for block_item in self.st_manager.textblk_item_list:
+            if id(block_item.blk) in changed_ids:
+                block_item.load_rich_text_html(block_item.blk.rich_text)
+        self.canvas.setProjSaveState(True)
 
     def on_imgtrans_progressbox_showed(self):
         # Handles both the preparation dialog and the RUN progress dialog.
