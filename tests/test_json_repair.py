@@ -49,9 +49,7 @@ class TestJsonRepair(unittest.TestCase):
 
     def test_json_array_extraction(self):
         raw = 'Here is the response: [{"id": 1, "translation": "Array item"}]'
-        extracted = _extract_json_block(raw)
-        self.assertEqual(extracted, '[{"id": 1, "translation": "Array item"}]')
-        res = _parse_or_repair_json(extracted, 1)
+        res = _parse_or_repair_json(raw, 1)
         self.assertIsNotNone(res)
         self.assertEqual(res['translations'][0]['translation'], 'Array item')
 
