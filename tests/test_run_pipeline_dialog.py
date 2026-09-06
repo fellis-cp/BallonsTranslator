@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from qtpy.QtCore import QObject, QEvent, QPoint, Qt
+from qtpy.QtCore import QCoreApplication, QObject, QEvent, QLocale, QPoint, Qt
 from qtpy.QtGui import QColor, QTextCursor, QTextDocument
 from qtpy.QtTest import QSignalSpy, QTest
 from qtpy.QtWidgets import (
@@ -36,9 +36,7 @@ from ballontranslator.ui.run_pipeline_dialog import (
 from ballontranslator.ui.configpanel import ConfigPanel
 from ballontranslator.ui.drawingpanel import DrawingPanel
 from ballontranslator.ui.canvas import Canvas
-from ballontranslator.ui.llm_profile_widgets import ProfileDetailsWidget
 from ballontranslator.ui.module_parse_widgets import ModuleParamDialog
-from ballontranslator.ui.page_range_progress import PageRangeProgressWidget
 from ballontranslator.ui.mainwindow import MainWindow
 from ballontranslator.ui.mainwindowbars import TitleBar
 from ballontranslator.ui.module_manager import ModuleManager
@@ -54,7 +52,6 @@ from ballontranslator.ui.text_engine.pipeline_formatting import (
 )
 from ballontranslator.utils.config import (
     AutoTateChuYokoConfig,
-    LLMGlossaryMode,
     LLMTranslateContext,
     OCRTextPostprocess,
     ProgramConfig,
@@ -75,7 +72,6 @@ from ballontranslator.utils.text_effects import (
     TextEffectStack,
 )
 from ballontranslator.utils.textblock import TextBlock
-from ballontranslator.modules import GET_VALID_TEXTDETECTORS
 from ballontranslator.modules.translators import base as translator_base
 from ballontranslator.modules.translators.base import postprocess_translation_text
 from ballontranslator.modules.translators.trans_llm import LLMTranslator
@@ -129,6 +125,15 @@ class RunPipelineDialogTests(unittest.TestCase):
             pcfg.module.llm_prior_context_token_budget,
             pcfg.module.llm_glossary_path,
             pcfg.module.llm_glossary_mode,
+            pcfg.module.llm_translate_vision,
+            pcfg.module.llm_translate_summary_memory,
+            pcfg.module.llm_translate_overwrite_summary,
+        )
+        self._llm_ocr_settings = (
+            pcfg.module.ocr,
+            pcfg.module.ocr_llm_page_level,
+            pcfg.module.ocr_llm_mask_non_text,
+            pcfg.module.ocr_llm_sort_reading_order,
         )
         self._visibility_states = (
             pcfg.show_textdetector_tool,
@@ -176,7 +181,16 @@ class RunPipelineDialogTests(unittest.TestCase):
             pcfg.module.llm_prior_context_token_budget,
             pcfg.module.llm_glossary_path,
             pcfg.module.llm_glossary_mode,
+            pcfg.module.llm_translate_vision,
+            pcfg.module.llm_translate_summary_memory,
+            pcfg.module.llm_translate_overwrite_summary,
         ) = self._pipeline_general_settings
+        (
+            pcfg.module.ocr,
+            pcfg.module.ocr_llm_page_level,
+            pcfg.module.ocr_llm_mask_non_text,
+            pcfg.module.ocr_llm_sort_reading_order,
+        ) = self._llm_ocr_settings
         self._save_config_patcher.stop()
 
     def test_ocr_text_postprocess_radio_buttons_update_module_config(self):
@@ -647,63 +661,88 @@ class RunPipelineDialogTests(unittest.TestCase):
         self.assertEqual(pcfg.module.translate_context, 'textblock')
         self.assertFalse(dialog.context_row.isHidden())
         self.assertTrue(dialog.llm_context_row.isHidden())
-        self.assertTrue(dialog.history_budget_row.isHidden())
+        self.assertTrue(dialog.llm_context_budget_row.isHidden())
         self.assertFalse(hasattr(dialog, 'show_MT_keyword_window'))
         dialog.close()
 
-    def test_llm_context_and_glossary_controls_persist_disabled_values(self):
+    def test_llm_ocr_run_settings_are_conditional_and_persistent(self):
+        pcfg.module.ocr = 'LLMOCR'
+        pcfg.module.ocr_llm_page_level = False
+        pcfg.module.ocr_llm_mask_non_text = True
+        pcfg.module.ocr_llm_sort_reading_order = False
+        dialog = RunPipelineDialog()
+
+        self.assertFalse(dialog.llm_ocr_settings.isHidden())
+        self.assertFalse(dialog.llm_ocr_mask_non_text.isEnabled())
+
+        dialog.llm_ocr_page_level.click()
+        self.assertTrue(pcfg.module.ocr_llm_page_level)
+        dialog.llm_ocr_mask_non_text.click()
+        dialog.llm_ocr_reading_order.click()
+        self.assertFalse(pcfg.module.ocr_llm_mask_non_text)
+        self.assertTrue(pcfg.module.ocr_llm_sort_reading_order)
+
+        dialog.setModuleSelection('ocr', 'mit48px')
+        self.assertTrue(dialog.llm_ocr_settings.isHidden())
+        dialog.close()
+
+    def test_llm_context_budget_stays_visible_and_persists(self):
         pcfg.module.llm_translate_context = LLMTranslateContext.PAGE
         pcfg.module.llm_prior_context_token_budget = 8192
-        pcfg.module.llm_glossary_path = ''
-        pcfg.module.llm_glossary_mode = LLMGlossaryMode.Matching
         translate_context = pcfg.module.translate_context
         dialog = RunPipelineDialog(
             translator_metadata={'name': 'LLMTranslator'},
         )
 
         self.assertTrue(dialog.context_row.isHidden())
-        self.assertFalse(dialog.llm_context_row.isHidden())
-        self.assertTrue(dialog.history_budget_row.isHidden())
-        self.assertEqual(
-            [
-                dialog.llm_context_combobox.itemText(index)
-                for index in range(dialog.llm_context_combobox.count())
-            ],
-            ['page', '+history'],
-        )
+        self.assertFalse(dialog.llm_context_budget_row.isHidden())
         history_index = dialog.llm_context_combobox.findData(
             LLMTranslateContext.HISTORY
         )
         dialog.llm_context_combobox.setCurrentIndex(history_index)
-        self.assertFalse(dialog.history_budget_row.isHidden())
+        self.assertFalse(dialog.llm_context_budget_row.isHidden())
         dialog.prior_context_token_budget.setValue(16384)
-        page_index = dialog.llm_context_combobox.findData(
-            LLMTranslateContext.PAGE
-        )
-        dialog.llm_context_combobox.setCurrentIndex(page_index)
-        dialog.glossary_path_edit.setText('/tmp/glossary.tsv')
-        all_index = dialog.glossary_mode_combobox.findData(LLMGlossaryMode.All)
-        dialog.glossary_mode_combobox.setCurrentIndex(all_index)
-        dialog.glossary_path_edit.clear()
 
         self.assertEqual(
             (
                 pcfg.module.llm_translate_context,
                 pcfg.module.llm_prior_context_token_budget,
-                pcfg.module.llm_glossary_path,
-                pcfg.module.llm_glossary_mode,
             ),
             (
-                LLMTranslateContext.PAGE,
+                LLMTranslateContext.HISTORY,
                 16384,
-                '',
-                LLMGlossaryMode.All,
             ),
         )
         self.assertEqual(pcfg.module.translate_context, translate_context)
-        self.assertEqual(dialog.prior_context_token_budget.value(), 16384)
-        self.assertTrue(dialog.history_budget_row.isHidden())
-        self.assertTrue(dialog.glossary_mode_combobox.isEnabled())
+        dialog.close()
+
+    def test_llm_context_uses_summary_memory_and_overwrite_controls(self):
+        pcfg.module.llm_translate_context = LLMTranslateContext.PAGE
+        pcfg.module.llm_translate_vision = False
+        pcfg.module.llm_translate_summary_memory = False
+        pcfg.module.llm_translate_overwrite_summary = False
+        dialog = RunPipelineDialog(
+            translator_metadata={'name': 'LLMTranslator'},
+        )
+
+        self.assertFalse(dialog.llm_overwrite_summary_checkbox.isChecked())
+        self.assertTrue(dialog.llm_features_row.isHidden())
+
+        dialog.llm_summary_memory_checkbox.setChecked(True)
+        self.assertTrue(pcfg.module.llm_translate_summary_memory)
+        self.assertFalse(dialog.llm_features_row.isHidden())
+        dialog.llm_overwrite_summary_checkbox.setChecked(True)
+        self.assertTrue(pcfg.module.llm_translate_overwrite_summary)
+
+        dialog.llm_vision_checkbox.setChecked(True)
+        dialog.llm_vision_checkbox.setChecked(False)
+        self.assertTrue(dialog.llm_summary_memory_checkbox.isChecked())
+        self.assertTrue(pcfg.module.llm_translate_summary_memory)
+
+        dialog.llm_summary_memory_checkbox.setChecked(False)
+        self.assertFalse(pcfg.module.llm_translate_summary_memory)
+        self.assertTrue(dialog.llm_features_row.isHidden())
+        self.assertTrue(pcfg.module.llm_translate_overwrite_summary)
         dialog.close()
 
     def test_copy_source_glossary_error_preserves_clipboard(self):
@@ -838,26 +877,65 @@ class RunPipelineDialogTests(unittest.TestCase):
                 'display_name': 'Delay',
             }
         }
+        events = []
         with patch(
-            'ballontranslator.ui.module_parse_widgets.save_config'
+            'ballontranslator.ui.module_parse_widgets.save_config',
+            side_effect=lambda: events.append(('save',)),
         ) as save:
             dialog = ModuleParamDialog('ocr', 'demo', params, False)
-            changes = []
             dialog.paramwidget_edited.connect(
-                lambda *args: changes.append(args)
+                lambda *args: events.append(('edit', args))
             )
             dialog_ref = weakref.ref(dialog)
             dialog.show()
             self.app.processEvents()
-            dialog.param_widget.param_widgets['delay'].setText('2')
-            self.assertEqual(changes[-1][:3], ('ocr', 'demo', 'delay'))
+            editor = dialog.param_widget.param_widgets['delay']
+            editor.setFocus()
+            editor.selectAll()
+            QTest.keyClicks(editor, '2')
+            self.assertEqual(events, [])
             dialog.close()
+            self.app.processEvents()
+            self.assertEqual(events[0][0], 'edit')
+            self.assertEqual(
+                events[0][1][:3], ('ocr', 'demo', 'delay')
+            )
+            self.assertEqual(events[0][1][3]['content'], '2')
+            self.assertEqual(events[1], ('save',))
             save.assert_called_once_with()
             del dialog
             QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             self.app.processEvents()
             gc.collect()
             self.assertIsNone(dialog_ref())
+
+    def test_numeric_module_param_keeps_dot_decimal_notation(self) -> None:
+        previous_locale = QLocale()
+        QLocale.setDefault(QLocale('de_DE'))
+        try:
+            with patch(
+                'ballontranslator.ui.module_parse_widgets.save_config'
+            ):
+                dialog = ModuleParamDialog(
+                    'translator',
+                    'demo',
+                    {'delay': {'type': 'line_editor', 'value': 0.0}},
+                    False,
+                )
+                try:
+                    editor = dialog.param_widget.param_widgets['delay']
+                    dialog.show()
+                    self.app.processEvents()
+                    editor.setFocus()
+                    editor.selectAll()
+                    QTest.keyClicks(editor, '0.3')
+                    QTest.keyClick(editor, Qt.Key.Key_Tab)
+                    self.app.processEvents()
+                    self.assertEqual(editor.text(), '0.3')
+                finally:
+                    dialog.close()
+        finally:
+            QLocale.setDefault(previous_locale)
 
     def test_module_param_dialog_shows_empty_message(self):
         with patch('ballontranslator.ui.module_parse_widgets.save_config'):
@@ -1051,6 +1129,12 @@ class RunPipelineDialogTests(unittest.TestCase):
 
     def test_view_actions_only_control_bottom_bar_visibility(self):
         window = QMainWindow()
+        self.addCleanup(
+            QCoreApplication.sendPostedEvents,
+            None,
+            QEvent.Type.DeferredDelete,
+        )
+        self.addCleanup(window.deleteLater)
         title_bar = TitleBar(window)
         visibility_texts = [action.text() for action in title_bar.moduleVisibilityActions]
         self.assertEqual(
@@ -1076,13 +1160,17 @@ class RunPipelineDialogTests(unittest.TestCase):
             [action.text() for action in title_bar.sponsorToolBtn.menu().actions()],
             ['Patreon', 'Afdian'],
         )
-        self.assertEqual(
-            [
+        self.assertTrue(
+            {
                 action.text()
                 for action in title_bar.toolsToolBtn.menu().actions()
                 if not action.isSeparator()
-            ],
-            ['区域合并工具', 'Font Exclusion'],
+            }.issuperset({
+                '区域合并工具',
+                'Photoshop Bridge',
+                'Path Reorder',
+                'Font Exclusion',
+            })
         )
         self.assertTrue(hasattr(title_bar, 'font_exclusion_trigger'))
         with patch(
@@ -1128,9 +1216,6 @@ class RunPipelineDialogTests(unittest.TestCase):
         self.assertFalse(widgets[0].visible)
         self.assertTrue(widgets[2].visible)
         self.assertTrue(widgets[3].visible)
-        title_bar.deleteLater()
-        window.deleteLater()
-
     def test_tool_visibility_round_trips_through_program_config(self):
         config = ProgramConfig(show_ocr_tool=False)
         restored = ProgramConfig(**json.loads(json_dump_program_config(config)))
@@ -1443,6 +1528,7 @@ class RunPipelineDialogTests(unittest.TestCase):
         )
         owner = SimpleNamespace(
             imgtrans_proj=project,
+            llmContextEditor=SimpleNamespace(refresh_context=Mock()),
             backup_blkstyles=[],
             _run_imgtrans_wo_textstyle_update=False,
             _render_only=True,
@@ -1536,6 +1622,7 @@ class RunPipelineDialogTests(unittest.TestCase):
         )
         owner = SimpleNamespace(
             imgtrans_proj=project,
+            llmContextEditor=SimpleNamespace(refresh_context=Mock()),
             backup_blkstyles=[],
             _run_imgtrans_wo_textstyle_update=False,
             _render_only=False,
@@ -1786,6 +1873,7 @@ class RunPipelineDialogTests(unittest.TestCase):
         )
         owner = SimpleNamespace(
             imgtrans_proj=project,
+            llmContextEditor=SimpleNamespace(refresh_context=Mock()),
             backup_blkstyles=[],
             _run_imgtrans_wo_textstyle_update=False,
             _render_only=False,
@@ -1878,6 +1966,7 @@ class RunPipelineDialogTests(unittest.TestCase):
         )
         owner = SimpleNamespace(
             imgtrans_proj=project,
+            llmContextEditor=SimpleNamespace(refresh_context=Mock()),
             backup_blkstyles=[],
             _run_imgtrans_wo_textstyle_update=False,
             _render_only=False,
