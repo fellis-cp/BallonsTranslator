@@ -7,9 +7,10 @@ import uuid
 import os
 import logging
 import sys
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from playwright.sync_api import sync_playwright
 from .base import BaseTranslator, register_translator
+from ..exceptions import LLMRequestStopped
 
 # --- Logger Setup ---
 # Module-scoped logger only; do not reconfigure the root logger.
@@ -37,16 +38,20 @@ def _is_refusal(text: str) -> bool:
             return True
     return False
 
-def _sleep_with_stop(duration: float, stop_event: Optional[threading.Event] = None) -> bool:
-    """Sleep for *duration* seconds while intermittently checking *stop_event*. Returns True if stopped early."""
+def _sleep_with_stop(
+    duration: float,
+    stop_event: Optional[threading.Event] = None,
+    cancel_checker: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """Sleep for *duration* seconds while intermittently checking *stop_event* or cancel_checker. Returns True if stopped early."""
     if duration <= 0:
-        return bool(stop_event and stop_event.is_set())
+        return bool((stop_event and stop_event.is_set()) or (cancel_checker and cancel_checker()))
     end_time = time.time() + duration
     while time.time() < end_time:
-        if stop_event and stop_event.is_set():
+        if (stop_event and stop_event.is_set()) or (cancel_checker and cancel_checker()):
             return True
         time.sleep(min(0.1, max(0.0, end_time - time.time())))
-    return bool(stop_event and stop_event.is_set())
+    return bool((stop_event and stop_event.is_set()) or (cancel_checker and cancel_checker()))
 
 
 def _extract_json_block(text: str) -> Optional[str]:
@@ -547,6 +552,37 @@ class GeminiBrowserWorker(threading.Thread):
         self.repair_worker = repair_worker
         self.task_queue = queue.Queue()
         self.running = True
+        self.page = None
+        self.cancel_requested = False
+
+    def cancel_current_task(self):
+        """Immediately cancel active and queued tasks for this worker."""
+        self.cancel_requested = True
+        while not self.task_queue.empty():
+            try:
+                task = self.task_queue.get_nowait()
+                task.done_event.set()
+                self.task_queue.task_done()
+            except queue.Empty:
+                break
+        self._trigger_browser_stop()
+
+    def _trigger_browser_stop(self):
+        if self.page is None:
+            return
+        try:
+            stop_selectors = "button[aria-label*='Stop'], button[aria-label*='Berhenti'], button[aria-label*='停止'], mat-icon:has-text('stop')"
+            for btn in self.page.query_selector_all(stop_selectors):
+                if btn.is_visible():
+                    btn.click()
+                    logger.info(f"Instance {self.instance_id}: Clicked browser Stop button.")
+                    break
+        except Exception:
+            pass
+        try:
+            self.page.keyboard.press("Escape")
+        except Exception:
+            pass
 
     def run(self):
         try:
@@ -565,12 +601,16 @@ class GeminiBrowserWorker(threading.Thread):
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
                 page = browser.pages[0]
+                self.page = page
                 self._safe_goto(page, "https://gemini.google.com", wait_extra=True)
 
                 while self.running:
                     task = None
                     try:
+                        self.cancel_requested = False
                         task = self.task_queue.get(timeout=1)
+                        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                            continue
                         if task.needs_refresh:
                             logger.info(f"Instance {self.instance_id}: Retry detected. Refreshing page...")
                             self._safe_goto(page, "https://gemini.google.com", wait_extra=True)
@@ -579,10 +619,12 @@ class GeminiBrowserWorker(threading.Thread):
                         
                         if task.result:
                             logger.info(f"Instance {self.instance_id}: Task completed successfully.")
-                            _sleep_with_stop(task.interval, task.stop_event)
+                            _sleep_with_stop(task.interval, task.stop_event, cancel_checker=lambda: self.cancel_requested)
+                        elif (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                            logger.info(f"Instance {self.instance_id}: Task cancelled by stop event.")
                         else:
                             logger.warning(f"Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
-                            _sleep_with_stop(5, task.stop_event)
+                            _sleep_with_stop(5, task.stop_event, cancel_checker=lambda: self.cancel_requested)
                     except queue.Empty:
                         continue
                     except Exception as e:
@@ -599,12 +641,15 @@ class GeminiBrowserWorker(threading.Thread):
         except Exception as e:
             logger.critical(f"Instance {self.instance_id}: Fatal Error: {e}")
         finally:
+            self.page = None
             self.running = False
 
-    def _wait_for_idle(self, page, timeout: float = 10.0):
+    def _wait_for_idle(self, page, timeout: float = 10.0, stop_event: Optional[threading.Event] = None):
         start = time.time()
         stop_selectors = "button[aria-label*='Stop'], button[aria-label*='Berhenti'], button[aria-label*='停止'], mat-icon:has-text('stop')"
         while (time.time() - start) < timeout:
+            if (stop_event and stop_event.is_set()) or self.cancel_requested:
+                break
             try:
                 stop_btns = page.query_selector_all(stop_selectors)
                 if not stop_btns:
@@ -613,13 +658,19 @@ class GeminiBrowserWorker(threading.Thread):
                 pass
             time.sleep(0.2)
 
-    def _send_text_to_chat(self, page, input_sel: str, text: str):
+    def _send_text_to_chat(self, page, input_sel: str, text: str, stop_event: Optional[threading.Event] = None) -> bool:
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.click(input_sel)
         time.sleep(0.2)
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.keyboard.press("Control+A")
         page.keyboard.press("Backspace")
         page.keyboard.insert_text(text)
         time.sleep(0.3)
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.keyboard.press("Enter")
         time.sleep(0.5)
         # Click send button as fallback if text remains unsubmitted
@@ -630,6 +681,7 @@ class GeminiBrowserWorker(threading.Thread):
                 send_btns[-1].click()
         except Exception:
             pass
+        return True
 
     def _safe_goto(self, page, url: str, wait_extra: bool = False):
         try:
@@ -651,9 +703,13 @@ class GeminiBrowserWorker(threading.Thread):
         return self._do_translate_batch(page, task)
 
     def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+            return None
         input_sel = "div[contenteditable='true']"
         try:
             page.wait_for_selector(input_sel, timeout=15000)
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                return None
             batch_token = f"BTCH_{uuid.uuid4().hex[:6]}"
             
             input_elements = []
@@ -689,7 +745,13 @@ class GeminiBrowserWorker(threading.Thread):
             logger.info(f"Input Count: {len(input_elements)} items")
             logger.info("-" * 50)
 
-            self._send_text_to_chat(page, input_sel, full_prompt)
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                return None
+
+            sent = self._send_text_to_chat(page, input_sel, full_prompt, stop_event=task.stop_event)
+            if not sent or (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
 
             start_wait = time.time()
             last_length = 0
@@ -701,7 +763,9 @@ class GeminiBrowserWorker(threading.Thread):
             logger.info(f"Instance {self.instance_id}: Waiting for response (Max {max_poll_time}s)...")
 
             while (time.time() - start_wait) < max_poll_time:
-                if task.stop_event and task.stop_event.is_set():
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    logger.info(f"Instance {self.instance_id}: Stop event detected. Halting generation...")
+                    self._trigger_browser_stop()
                     return None
                 time.sleep(0.3) 
                 responses = page.query_selector_all(".markdown, .message-content")
@@ -761,11 +825,12 @@ class GeminiBrowserWorker(threading.Thread):
                         f"RAW OUTPUT TO FIX:\n{current_text[:2000]}"
                     )
                     try:
-                        self._send_text_to_chat(page, input_sel, repair_prompt)
+                        self._send_text_to_chat(page, input_sel, repair_prompt, stop_event=task.stop_event)
 
                         repair_start = time.time()
                         while (time.time() - repair_start) < 30:
-                            if task.stop_event and task.stop_event.is_set():
+                            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                                self._trigger_browser_stop()
                                 return None
                             time.sleep(0.3)
                             resp_els = page.query_selector_all(".markdown, .message-content")
@@ -793,9 +858,13 @@ class GeminiBrowserWorker(threading.Thread):
             return None
 
     def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+            return None
         input_sel = "div[contenteditable='true']"
         try:
             page.wait_for_selector(input_sel, timeout=15000)
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                return None
 
             input_elements = []
             current_global_id = 1
@@ -812,8 +881,9 @@ class GeminiBrowserWorker(threading.Thread):
             collected_translations: List[dict] = []
 
             for idx, elem in enumerate(input_elements):
-                if task.stop_event and task.stop_event.is_set():
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                     logger.info(f"Instance {self.instance_id}: Translation cancelled by stop event.")
+                    self._trigger_browser_stop()
                     return None
 
                 item_id = elem["id"]
@@ -824,7 +894,7 @@ class GeminiBrowserWorker(threading.Thread):
                     continue
 
                 # Wait for any previous generation to finish
-                self._wait_for_idle(page, timeout=10.0)
+                self._wait_for_idle(page, timeout=10.0, stop_event=task.stop_event)
 
                 # Record existing response count before sending this item to avoid reading prior turns
                 existing_responses = page.query_selector_all(".markdown, .message-content")
@@ -850,7 +920,10 @@ class GeminiBrowserWorker(threading.Thread):
 
                 logger.info(f"Instance {self.instance_id}: [ITEM {item_id}/{len(input_elements)}] Token: {item_token}")
 
-                self._send_text_to_chat(page, input_sel, full_prompt)
+                sent = self._send_text_to_chat(page, input_sel, full_prompt, stop_event=task.stop_event)
+                if not sent or (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
+                    return None
 
                 start_wait = time.time()
                 last_length = 0
@@ -859,7 +932,8 @@ class GeminiBrowserWorker(threading.Thread):
                 item_trans = None
 
                 while (time.time() - start_wait) < item_timeout:
-                    if task.stop_event and task.stop_event.is_set():
+                    if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                        self._trigger_browser_stop()
                         return None
                     time.sleep(0.3)
                     responses = page.query_selector_all(".markdown, .message-content")
@@ -912,7 +986,10 @@ class GeminiBrowserWorker(threading.Thread):
 
                 # Respect interval between sequential items
                 if idx < len(input_elements) - 1 and task.interval > 0:
-                    _sleep_with_stop(task.interval, task.stop_event)
+                    stopped = _sleep_with_stop(task.interval, task.stop_event, cancel_checker=lambda: self.cancel_requested)
+                    if stopped:
+                        self._trigger_browser_stop()
+                        return None
 
             return _build_results(task.src_list, collected_translations)
 
@@ -935,7 +1012,38 @@ class DeepSeekBrowserWorker(threading.Thread):
         self.repair_worker = repair_worker
         self.task_queue = queue.Queue()
         self.running = True
+        self.page = None
+        self.cancel_requested = False
         self.translate_count = 0
+
+    def cancel_current_task(self):
+        """Immediately cancel active and queued tasks for this worker."""
+        self.cancel_requested = True
+        while not self.task_queue.empty():
+            try:
+                task = self.task_queue.get_nowait()
+                task.done_event.set()
+                self.task_queue.task_done()
+            except queue.Empty:
+                break
+        self._trigger_browser_stop()
+
+    def _trigger_browser_stop(self):
+        if self.page is None:
+            return
+        try:
+            stop_selectors = ".ds-icon-button, button[aria-label*='Stop'], button[aria-label*='停止'], [class*='stop']"
+            for btn in self.page.query_selector_all(stop_selectors):
+                if btn.is_visible():
+                    btn.click()
+                    logger.info(f"DeepSeek Instance {self.instance_id}: Clicked browser Stop button.")
+                    break
+        except Exception:
+            pass
+        try:
+            self.page.keyboard.press("Escape")
+        except Exception:
+            pass
 
     def run(self):
         try:
@@ -954,12 +1062,16 @@ class DeepSeekBrowserWorker(threading.Thread):
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
                 page = browser.pages[0]
+                self.page = page
                 self._safe_goto(page, "https://chat.deepseek.com", wait_extra=True)
 
                 while self.running:
                     task = None
                     try:
+                        self.cancel_requested = False
                         task = self.task_queue.get(timeout=1)
+                        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                            continue
                         if task.needs_refresh:
                             logger.info(f"DeepSeek Instance {self.instance_id}: Resetting chat history...")
                             self._start_new_chat(page)
@@ -969,10 +1081,12 @@ class DeepSeekBrowserWorker(threading.Thread):
                         
                         if task.result:
                             logger.info(f"DeepSeek Instance {self.instance_id}: Task completed successfully.")
-                            _sleep_with_stop(task.interval, task.stop_event)
+                            _sleep_with_stop(task.interval, task.stop_event, cancel_checker=lambda: self.cancel_requested)
+                        elif (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                            logger.info(f"DeepSeek Instance {self.instance_id}: Task cancelled by stop event.")
                         else:
                             logger.warning(f"DeepSeek Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
-                            _sleep_with_stop(5, task.stop_event)
+                            _sleep_with_stop(5, task.stop_event, cancel_checker=lambda: self.cancel_requested)
                     except queue.Empty:
                         continue
                     except Exception as e:
@@ -991,12 +1105,15 @@ class DeepSeekBrowserWorker(threading.Thread):
         except Exception as e:
             logger.critical(f"DeepSeek Instance {self.instance_id}: Fatal Error: {e}")
         finally:
+            self.page = None
             self.running = False
 
-    def _wait_for_idle(self, page, timeout: float = 10.0):
+    def _wait_for_idle(self, page, timeout: float = 10.0, stop_event: Optional[threading.Event] = None):
         start = time.time()
         stop_selectors = ".ds-icon-button, button[aria-label*='Stop'], button[aria-label*='停止'], [class*='stop']"
         while (time.time() - start) < timeout:
+            if (stop_event and stop_event.is_set()) or self.cancel_requested:
+                break
             try:
                 stop_btns = page.query_selector_all(stop_selectors)
                 if not stop_btns:
@@ -1005,13 +1122,19 @@ class DeepSeekBrowserWorker(threading.Thread):
                 pass
             time.sleep(0.2)
 
-    def _send_text_to_chat(self, page, input_sel: str, text: str):
+    def _send_text_to_chat(self, page, input_sel: str, text: str, stop_event: Optional[threading.Event] = None) -> bool:
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.click(input_sel)
         time.sleep(0.1)
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.keyboard.press("Control+A")
         page.keyboard.press("Backspace")
         page.keyboard.insert_text(text)
         time.sleep(0.2)
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.keyboard.press("Enter")
         time.sleep(0.4)
         send_selectors = "button[aria-label*='Send'], .ds-send-button, button[type='submit']"
@@ -1021,6 +1144,7 @@ class DeepSeekBrowserWorker(threading.Thread):
                 send_btns[-1].click()
         except Exception:
             pass
+        return True
 
     def _start_new_chat(self, page):
         try:
@@ -1054,6 +1178,8 @@ class DeepSeekBrowserWorker(threading.Thread):
         return self._do_translate_batch(page, task)
 
     def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+            return None
         INPUT_SEL = "textarea[placeholder='Message DeepSeek']"
         SELECTORS = ".ds-markdown, .ds-assistant-message-main-content, .markdown, .message-content"
 
@@ -1062,7 +1188,8 @@ class DeepSeekBrowserWorker(threading.Thread):
         MAX_RATE_RETRIES = 3
 
         while True:
-            if task.stop_event and task.stop_event.is_set():
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
                 return None
             try:
                 current_url = page.url
@@ -1070,6 +1197,9 @@ class DeepSeekBrowserWorker(threading.Thread):
                     page.wait_for_selector(INPUT_SEL, timeout=90000)
 
                 page.wait_for_selector(INPUT_SEL, timeout=15000)
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
+                    return None
                 
                 existing_responses = page.query_selector_all(SELECTORS)
                 if existing_responses:
@@ -1108,7 +1238,13 @@ class DeepSeekBrowserWorker(threading.Thread):
 
                 full_prompt = "\n".join(prompt_parts)
 
-                self._send_text_to_chat(page, INPUT_SEL, full_prompt)
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    return None
+
+                sent = self._send_text_to_chat(page, INPUT_SEL, full_prompt, stop_event=task.stop_event)
+                if not sent or (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
+                    return None
 
                 start_wait = time.time()
                 last_length = 0
@@ -1118,7 +1254,9 @@ class DeepSeekBrowserWorker(threading.Thread):
                 no_growth_timeout = 30.0
 
                 while (time.time() - start_wait) < max_poll_time:
-                    if task.stop_event and task.stop_event.is_set():
+                    if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                        logger.info(f"DeepSeek Instance {self.instance_id}: Stop event detected. Halting generation...")
+                        self._trigger_browser_stop()
                         return None
                     time.sleep(0.2)
                     
@@ -1135,7 +1273,7 @@ class DeepSeekBrowserWorker(threading.Thread):
                                 if rate_limit_retries < MAX_RATE_RETRIES:
                                     rate_limit_retries += 1
                                     logger.info(f"DeepSeek: Sleeping 30 seconds before retrying (attempt {rate_limit_retries}/{MAX_RATE_RETRIES})...")
-                                    _sleep_with_stop(30, task.stop_event)
+                                    _sleep_with_stop(30, task.stop_event, cancel_checker=lambda: self.cancel_requested)
                                     self._start_new_chat(page)
                                     self.translate_count = 0
                                     break
@@ -1221,6 +1359,8 @@ class DeepSeekBrowserWorker(threading.Thread):
                 return None
 
     def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+            return None
         INPUT_SEL = "textarea[placeholder='Message DeepSeek']"
         SELECTORS = ".ds-markdown, .ds-assistant-message-main-content, .markdown, .message-content"
 
@@ -1230,6 +1370,9 @@ class DeepSeekBrowserWorker(threading.Thread):
                 page.wait_for_selector(INPUT_SEL, timeout=90000)
 
             page.wait_for_selector(INPUT_SEL, timeout=15000)
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
 
             input_elements = []
             current_global_id = 1
@@ -1246,7 +1389,8 @@ class DeepSeekBrowserWorker(threading.Thread):
             collected_translations: List[dict] = []
 
             for idx, elem in enumerate(input_elements):
-                if task.stop_event and task.stop_event.is_set():
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
                     return None
 
                 item_id = elem["id"]
@@ -1256,7 +1400,7 @@ class DeepSeekBrowserWorker(threading.Thread):
                     collected_translations.append({"id": item_id, "translation": ""})
                     continue
 
-                self._wait_for_idle(page, timeout=10.0)
+                self._wait_for_idle(page, timeout=10.0, stop_event=task.stop_event)
 
                 existing_responses = page.query_selector_all(SELECTORS)
                 initial_count = len(existing_responses)
@@ -1281,7 +1425,10 @@ class DeepSeekBrowserWorker(threading.Thread):
 
                 logger.info(f"DeepSeek Instance {self.instance_id}: [ITEM {item_id}/{len(input_elements)}] Token: {item_token}")
 
-                self._send_text_to_chat(page, INPUT_SEL, full_prompt)
+                sent = self._send_text_to_chat(page, INPUT_SEL, full_prompt, stop_event=task.stop_event)
+                if not sent or (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
+                    return None
 
                 start_wait = time.time()
                 last_length = 0
@@ -1290,7 +1437,8 @@ class DeepSeekBrowserWorker(threading.Thread):
                 item_trans = None
 
                 while (time.time() - start_wait) < item_timeout:
-                    if task.stop_event and task.stop_event.is_set():
+                    if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                        self._trigger_browser_stop()
                         return None
                     time.sleep(0.2)
 
@@ -1300,7 +1448,7 @@ class DeepSeekBrowserWorker(threading.Thread):
                         error_text = " ".join(el.inner_text().lower() for el in error_els) if error_els else ""
                         if "messages too frequent" in error_text or "try again later" in error_text or "发送消息过于频繁" in error_text:
                             logger.warning("DeepSeek: Rate limit detected in sequential mode. Cooldown 15s...")
-                            _sleep_with_stop(15, task.stop_event)
+                            _sleep_with_stop(15, task.stop_event, cancel_checker=lambda: self.cancel_requested)
                             self._start_new_chat(page)
                             break
                     except Exception:
@@ -1362,7 +1510,10 @@ class DeepSeekBrowserWorker(threading.Thread):
                     collected_translations.append({"id": item_id, "translation": item_text})
 
                 if idx < len(input_elements) - 1 and task.interval > 0:
-                    _sleep_with_stop(task.interval, task.stop_event)
+                    stopped = _sleep_with_stop(task.interval, task.stop_event, cancel_checker=lambda: self.cancel_requested)
+                    if stopped:
+                        self._trigger_browser_stop()
+                        return None
 
             return _build_results(task.src_list, collected_translations)
 
@@ -1384,7 +1535,29 @@ class DeepLBrowserWorker(threading.Thread):
         self.instance_id = instance_id
         self.task_queue = queue.Queue()
         self.running = True
+        self.page = None
+        self.cancel_requested = False
         self.translate_count = 0
+
+    def cancel_current_task(self):
+        """Immediately cancel active and queued tasks for this worker."""
+        self.cancel_requested = True
+        while not self.task_queue.empty():
+            try:
+                task = self.task_queue.get_nowait()
+                task.done_event.set()
+                self.task_queue.task_done()
+            except queue.Empty:
+                break
+        self._trigger_browser_stop()
+
+    def _trigger_browser_stop(self):
+        if self.page is None:
+            return
+        try:
+            self.page.keyboard.press("Escape")
+        except Exception:
+            pass
 
     def run(self):
         try:
@@ -1403,12 +1576,16 @@ class DeepLBrowserWorker(threading.Thread):
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
                 page = browser.pages[0]
+                self.page = page
                 self._safe_goto(page, "https://www.deepl.com/translator#auto/id", wait_extra=True)
 
                 while self.running:
                     task = None
                     try:
+                        self.cancel_requested = False
                         task = self.task_queue.get(timeout=1)
+                        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                            continue
                         if task.needs_refresh:
                             lang_code = self._map_lang_code(task.target_lang)
                             self._safe_goto(page, f"https://www.deepl.com/translator#auto/{lang_code}", wait_extra=True)
@@ -1418,10 +1595,12 @@ class DeepLBrowserWorker(threading.Thread):
                         
                         if task.result:
                             logger.info(f"DeepL Instance {self.instance_id}: Task completed successfully.")
-                            _sleep_with_stop(task.interval, task.stop_event)
+                            _sleep_with_stop(task.interval, task.stop_event, cancel_checker=lambda: self.cancel_requested)
+                        elif (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                            logger.info(f"DeepL Instance {self.instance_id}: Task cancelled by stop event.")
                         else:
                             logger.warning(f"DeepL Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
-                            _sleep_with_stop(5, task.stop_event)
+                            _sleep_with_stop(5, task.stop_event, cancel_checker=lambda: self.cancel_requested)
                     except queue.Empty:
                         continue
                     except Exception as e:
@@ -1441,6 +1620,7 @@ class DeepLBrowserWorker(threading.Thread):
         except Exception as e:
             logger.critical(f"DeepL Instance {self.instance_id}: Fatal Error: {e}")
         finally:
+            self.page = None
             self.running = False
 
     @staticmethod
@@ -1488,14 +1668,23 @@ class DeepLBrowserWorker(threading.Thread):
         return self._do_translate_batch(page, task)
 
     def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+            return None
         input_sel = 'd-textarea[data-testid="translator-source-input"]'
         output_sel = 'd-textarea[data-testid="translator-target-input"]'
         try:
             page.wait_for_selector(input_sel, timeout=15000)
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
 
             lang_code = self._map_lang_code(task.target_lang)
             if f"#auto/{lang_code}" not in page.url:
                 self._safe_goto(page, f"https://www.deepl.com/translator#auto/{lang_code}", wait_extra=True)
+
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
 
             page.click(input_sel)
             page.keyboard.press("Control+A")
@@ -1504,12 +1693,19 @@ class DeepLBrowserWorker(threading.Thread):
             # Wait for target input to clear
             start_clear = time.time()
             while time.time() - start_clear < 3:
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
+                    return None
                 try:
                     target_text = page.query_selector(output_sel).inner_text().strip()
                     if not target_text: break
                 except Exception:
                     pass
                 time.sleep(0.1)
+
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
 
             # DeepL paragraph preservation: join with double newlines
             joined_input = "\n\n".join(task.src_list)
@@ -1520,7 +1716,9 @@ class DeepLBrowserWorker(threading.Thread):
             stable_checks = 0
             max_poll_time = max(task.timeout, _calculate_timeout(task.src_list, base_timeout=task.timeout))
             while (time.time() - start_wait) < max_poll_time:
-                if task.stop_event and task.stop_event.is_set():
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    logger.info(f"DeepL Instance {self.instance_id}: Stop event detected.")
+                    self._trigger_browser_stop()
                     return None
                 time.sleep(0.2)
                 try:
@@ -1560,10 +1758,15 @@ class DeepLBrowserWorker(threading.Thread):
             return None
 
     def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+            return None
         input_sel = 'd-textarea[data-testid="translator-source-input"]'
         output_sel = 'd-textarea[data-testid="translator-target-input"]'
         try:
             page.wait_for_selector(input_sel, timeout=15000)
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
 
             lang_code = self._map_lang_code(task.target_lang)
             if f"#auto/{lang_code}" not in page.url:
@@ -1580,7 +1783,8 @@ class DeepLBrowserWorker(threading.Thread):
             collected_translations: List[dict] = []
 
             for idx, elem in enumerate(input_elements):
-                if task.stop_event and task.stop_event.is_set():
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
                     return None
 
                 item_id = elem["id"]
@@ -1590,18 +1794,29 @@ class DeepLBrowserWorker(threading.Thread):
                     collected_translations.append({"id": item_id, "translation": ""})
                     continue
 
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
+                    return None
+
                 page.click(input_sel)
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
 
                 start_clear = time.time()
                 while time.time() - start_clear < 2:
+                    if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                        self._trigger_browser_stop()
+                        return None
                     try:
                         target_text = page.query_selector(output_sel).inner_text().strip()
                         if not target_text: break
                     except Exception:
                         pass
                     time.sleep(0.1)
+
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
+                    return None
 
                 page.keyboard.insert_text(src)
 
@@ -1611,7 +1826,8 @@ class DeepLBrowserWorker(threading.Thread):
                 item_translated = None
 
                 while (time.time() - start_wait) < 30:
-                    if task.stop_event and task.stop_event.is_set():
+                    if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                        self._trigger_browser_stop()
                         return None
                     time.sleep(0.2)
                     try:
@@ -1638,7 +1854,10 @@ class DeepLBrowserWorker(threading.Thread):
                 })
 
                 if idx < len(input_elements) - 1 and task.interval > 0:
-                    _sleep_with_stop(task.interval, task.stop_event)
+                    stopped = _sleep_with_stop(task.interval, task.stop_event, cancel_checker=lambda: self.cancel_requested)
+                    if stopped:
+                        self._trigger_browser_stop()
+                        return None
 
             return _build_results(task.src_list, collected_translations)
         except Exception as e:
@@ -1657,7 +1876,38 @@ class NoTrackBrowserWorker(threading.Thread):
         self.instance_id = instance_id
         self.repair_worker = repair_worker
         self.task_queue = queue.Queue()
+        self.page = None
+        self.cancel_requested = False
         self.running = True
+
+    def cancel_current_task(self):
+        """Immediately cancel active and queued tasks for this worker."""
+        self.cancel_requested = True
+        while not self.task_queue.empty():
+            try:
+                task = self.task_queue.get_nowait()
+                task.done_event.set()
+                self.task_queue.task_done()
+            except queue.Empty:
+                break
+        self._trigger_browser_stop()
+
+    def _trigger_browser_stop(self):
+        if self.page is None:
+            return
+        try:
+            stop_selectors = "button[aria-label*='Stop'], [class*='stop'], button#stop"
+            for btn in self.page.query_selector_all(stop_selectors):
+                if btn.is_visible():
+                    btn.click()
+                    logger.info(f"NoTrack Instance {self.instance_id}: Clicked browser Stop button.")
+                    break
+        except Exception:
+            pass
+        try:
+            self.page.keyboard.press("Escape")
+        except Exception:
+            pass
 
     def run(self):
         try:
@@ -1676,12 +1926,16 @@ class NoTrackBrowserWorker(threading.Thread):
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
                 page = browser.pages[0]
+                self.page = page
                 self._safe_goto(page, "https://notrack.ai/chat", wait_extra=True)
 
                 while self.running:
                     task = None
                     try:
+                        self.cancel_requested = False
                         task = self.task_queue.get(timeout=1)
+                        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                            continue
                         if task.needs_refresh:
                             logger.info(f"NoTrack Instance {self.instance_id}: Refreshing page...")
                             self._safe_goto(page, "https://notrack.ai/chat", wait_extra=True)
@@ -1690,10 +1944,12 @@ class NoTrackBrowserWorker(threading.Thread):
                         
                         if task.result:
                             logger.info(f"NoTrack Instance {self.instance_id}: Task completed successfully.")
-                            _sleep_with_stop(task.interval, task.stop_event)
+                            _sleep_with_stop(task.interval, task.stop_event, cancel_checker=lambda: self.cancel_requested)
+                        elif (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                            logger.info(f"NoTrack Instance {self.instance_id}: Task cancelled by stop event.")
                         else:
                             logger.warning(f"NoTrack Instance {self.instance_id}: Task error/failed. Cooldown 5s...")
-                            _sleep_with_stop(5, task.stop_event)
+                            _sleep_with_stop(5, task.stop_event, cancel_checker=lambda: self.cancel_requested)
                     except queue.Empty:
                         continue
                     except Exception as e:
@@ -1707,12 +1963,15 @@ class NoTrackBrowserWorker(threading.Thread):
         except Exception as e:
             logger.critical(f"NoTrack Instance {self.instance_id}: Fatal Error: {e}")
         finally:
+            self.page = None
             self.running = False
 
-    def _wait_for_idle(self, page, timeout: float = 10.0):
+    def _wait_for_idle(self, page, timeout: float = 10.0, stop_event: Optional[threading.Event] = None):
         start = time.time()
         stop_selectors = "button[aria-label*='Stop'], [class*='stop'], button#stop"
         while (time.time() - start) < timeout:
+            if (stop_event and stop_event.is_set()) or self.cancel_requested:
+                break
             try:
                 stop_btns = page.query_selector_all(stop_selectors)
                 if not stop_btns:
@@ -1721,13 +1980,19 @@ class NoTrackBrowserWorker(threading.Thread):
                 pass
             time.sleep(0.2)
 
-    def _send_text_to_chat(self, page, input_sel: str, text: str):
+    def _send_text_to_chat(self, page, input_sel: str, text: str, stop_event: Optional[threading.Event] = None) -> bool:
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.click(input_sel)
         time.sleep(0.2)
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.keyboard.press("Control+A")
         page.keyboard.press("Backspace")
         page.keyboard.insert_text(text)
         time.sleep(0.3)
+        if (stop_event and stop_event.is_set()) or self.cancel_requested:
+            return False
         page.keyboard.press("Enter")
         time.sleep(0.5)
         send_selectors = "button#send, button[type='submit'], [class*='send']"
@@ -1737,6 +2002,7 @@ class NoTrackBrowserWorker(threading.Thread):
                 send_btns[-1].click()
         except Exception:
             pass
+        return True
 
     def _safe_goto(self, page, url: str, wait_extra: bool = False):
         try:
@@ -1758,9 +2024,14 @@ class NoTrackBrowserWorker(threading.Thread):
         return self._do_translate_batch(page, task)
 
     def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+            return None
         input_sel = "textarea#field"
         try:
             page.wait_for_selector(input_sel, timeout=15000)
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
             batch_token = f"BTCH_{uuid.uuid4().hex[:6]}"
             
             input_elements = []
@@ -1796,7 +2067,10 @@ class NoTrackBrowserWorker(threading.Thread):
             logger.info(f"Input Count: {len(input_elements)} items")
             logger.info("-" * 50)
 
-            self._send_text_to_chat(page, input_sel, full_prompt)
+            sent = self._send_text_to_chat(page, input_sel, full_prompt, stop_event=task.stop_event)
+            if not sent or (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
 
             start_wait = time.time()
             last_length = 0
@@ -1808,7 +2082,9 @@ class NoTrackBrowserWorker(threading.Thread):
             logger.info(f"NoTrack Instance {self.instance_id}: Waiting for response (Max {max_poll_time}s)...")
 
             while (time.time() - start_wait) < max_poll_time:
-                if task.stop_event and task.stop_event.is_set():
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    logger.info(f"NoTrack Instance {self.instance_id}: Stop event detected. Halting generation...")
+                    self._trigger_browser_stop()
                     return None
                 time.sleep(0.3) 
                 responses = page.query_selector_all(".row:not(.usr) .bubble")
@@ -1872,9 +2148,14 @@ class NoTrackBrowserWorker(threading.Thread):
             return None
 
     def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
+        if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+            return None
         input_sel = "textarea#field"
         try:
             page.wait_for_selector(input_sel, timeout=15000)
+            if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                self._trigger_browser_stop()
+                return None
 
             input_elements = []
             current_global_id = 1
@@ -1891,7 +2172,8 @@ class NoTrackBrowserWorker(threading.Thread):
             collected_translations: List[dict] = []
 
             for idx, elem in enumerate(input_elements):
-                if task.stop_event and task.stop_event.is_set():
+                if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
                     return None
 
                 item_id = elem["id"]
@@ -1901,7 +2183,7 @@ class NoTrackBrowserWorker(threading.Thread):
                     collected_translations.append({"id": item_id, "translation": ""})
                     continue
 
-                self._wait_for_idle(page, timeout=10.0)
+                self._wait_for_idle(page, timeout=10.0, stop_event=task.stop_event)
 
                 existing_responses = page.query_selector_all(".row:not(.usr) .bubble")
                 initial_count = len(existing_responses)
@@ -1926,7 +2208,10 @@ class NoTrackBrowserWorker(threading.Thread):
 
                 logger.info(f"NoTrack Instance {self.instance_id}: [ITEM {item_id}/{len(input_elements)}] Token: {item_token}")
 
-                self._send_text_to_chat(page, input_sel, full_prompt)
+                sent = self._send_text_to_chat(page, input_sel, full_prompt, stop_event=task.stop_event)
+                if not sent or (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                    self._trigger_browser_stop()
+                    return None
 
                 start_wait = time.time()
                 last_length = 0
@@ -1935,7 +2220,8 @@ class NoTrackBrowserWorker(threading.Thread):
                 item_trans = None
 
                 while (time.time() - start_wait) < item_timeout:
-                    if task.stop_event and task.stop_event.is_set():
+                    if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
+                        self._trigger_browser_stop()
                         return None
                     time.sleep(0.3)
                     responses = page.query_selector_all(".row:not(.usr) .bubble")
@@ -1984,7 +2270,10 @@ class NoTrackBrowserWorker(threading.Thread):
                     collected_translations.append({"id": item_id, "translation": item_text})
 
                 if idx < len(input_elements) - 1 and task.interval > 0:
-                    _sleep_with_stop(task.interval, task.stop_event)
+                    stopped = _sleep_with_stop(task.interval, task.stop_event, cancel_checker=lambda: self.cancel_requested)
+                    if stopped:
+                        self._trigger_browser_stop()
+                        return None
 
             return _build_results(task.src_list, collected_translations)
 
@@ -2059,11 +2348,20 @@ class TransGemini(BaseTranslator):
         self.worker: Optional[threading.Thread] = None
         self.repair_worker: Optional[JsonRepairWorker] = None
         self.stop_event: Optional[threading.Event] = None
+        self._force_stopped: bool = False
         self.instance_id = self._acquire_instance_id()
         super().__init__(*args, **kwargs)
 
     def set_stop_event(self, stop_event: Optional[threading.Event]):
         self.stop_event = stop_event
+
+    def force_stop(self):
+        """Force stops the ongoing Playwright translation immediately."""
+        self._force_stopped = True
+        if self.stop_event:
+            self.stop_event.set()
+        if self.worker and hasattr(self.worker, "cancel_current_task"):
+            self.worker.cancel_current_task()
 
     @property
     def provider(self) -> str:
@@ -2206,8 +2504,10 @@ class TransGemini(BaseTranslator):
 
     def _translate(self, src_list: List[str]) -> List[str]:
         if not src_list: return src_list
-        if self.stop_event and self.stop_event.is_set():
-            return src_list
+        self._force_stopped = False
+        if (self.stop_event and self.stop_event.is_set()) or self._force_stopped:
+            self.force_stop()
+            raise LLMRequestStopped()
         
         self._setup_translator()
         source = self.lang_map.get(self.lang_source, self.lang_source)
@@ -2242,9 +2542,10 @@ class TransGemini(BaseTranslator):
         # the call stack shallow and the timeout predictable.
         max_retries = 1
         for attempt in range(max_retries + 1):
-            if self.stop_event and self.stop_event.is_set():
+            if (self.stop_event and self.stop_event.is_set()) or self._force_stopped:
                 logger.info(f"Instance {self.instance_id} ({self.provider}): Stop event detected.")
-                return src_list
+                self.force_stop()
+                raise LLMRequestStopped()
 
             needs_refresh = attempt > 0
             if needs_refresh:
@@ -2260,13 +2561,21 @@ class TransGemini(BaseTranslator):
             wait_timeout = calc_timeout + 30
             start_wait = time.time()
             while (time.time() - start_wait) < wait_timeout:
-                if self.stop_event and self.stop_event.is_set():
+                if (self.stop_event and self.stop_event.is_set()) or self._force_stopped:
                     logger.info(f"Instance {self.instance_id} ({self.provider}): Stop event detected.")
-                    return src_list
+                    self.force_stop()
+                    raise LLMRequestStopped()
                 if task.done_event.wait(timeout=0.5):
+                    if (self.stop_event and self.stop_event.is_set()) or self._force_stopped:
+                        self.force_stop()
+                        raise LLMRequestStopped()
                     if task.result is not None:
                         return task.result
                     break
+
+        if (self.stop_event and self.stop_event.is_set()) or self._force_stopped:
+            self.force_stop()
+            raise LLMRequestStopped()
 
         logger.error(f"Instance {self.instance_id} ({self.provider}): [FAILED] Returning original text.")
         return src_list
