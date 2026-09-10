@@ -15,7 +15,9 @@ from ballontranslator.utils.textblock import collect_textblock_regions
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-MODEL_DIR = "data/models/PP-OCRv6_medium_rec_onnx"
+_PACKAGE_ROOT = osp.abspath(osp.join(osp.dirname(__file__), '..', '..', '..'))
+_LOCAL_MODEL_DIR = osp.join(_PACKAGE_ROOT, "data", "models", "PP-OCRv6_medium_rec_onnx")
+MODEL_DIR = _LOCAL_MODEL_DIR if osp.exists(_LOCAL_MODEL_DIR) else "data/models/PP-OCRv6_medium_rec_onnx"
 
 
 _CUDA_LIBRARY_PATTERNS = (

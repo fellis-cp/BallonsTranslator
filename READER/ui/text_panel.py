@@ -15,9 +15,10 @@ from qtpy.QtWidgets import (
     QApplication,
     QSizePolicy,
 )
-from qtpy.QtCore import Qt, Signal, QSize
+from qtpy.QtCore import Qt, Signal, QSize, QTimer
 
 from READER.core.loader import MangaPage
+from READER.core.translation_worker import OCR_ENGINE_LIST, HAS_OCR_MODULES
 
 LOGGER = logging.getLogger('READER.text_panel')
 
@@ -44,7 +45,11 @@ class BlockRowCard(QFrame):
 
     selected = Signal(int)
     text_modified = Signal(int)
+    text_committed = Signal(int, str, object, object)
     translate_requested = Signal(int)
+    ocr_requested = Signal(int)
+    delete_requested = Signal(int)
+    style_requested = Signal(int)
 
     def __init__(self, block_idx: int, block: Any, parent=None):
         super().__init__(parent)
@@ -52,6 +57,13 @@ class BlockRowCard(QFrame):
         self.block = block
         self._is_selected = False
         self._updating_ui = False
+        self._initial_orig = ""
+        self._initial_trans = ""
+
+        self._commit_timer = QTimer(self)
+        self._commit_timer.setSingleShot(True)
+        self._commit_timer.setInterval(600)
+        self._commit_timer.timeout.connect(self._on_commit_timeout)
 
         self.setObjectName("BlockRowCard")
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -84,6 +96,16 @@ class BlockRowCard(QFrame):
         self.lbl_info.setStyleSheet("color: #94a3b8; font-size: 11px;")
         header_layout.addWidget(self.lbl_info, stretch=1)
 
+        # Apply style single block button
+        self.btn_style = QPushButton("🎨")
+        self.btn_style.setFixedWidth(28)
+        self.btn_style.setToolTip("Apply page dialogue styling to this block")
+        self.btn_style.setStyleSheet(
+            "padding: 2px; font-size: 11px; background: #6d28d9; color: white; border-radius: 4px;"
+        )
+        self.btn_style.clicked.connect(self._emit_style_requested)
+        header_layout.addWidget(self.btn_style)
+
         # Copy translated text button
         self.btn_copy = QPushButton("📋")
         self.btn_copy.setFixedWidth(28)
@@ -95,15 +117,35 @@ class BlockRowCard(QFrame):
         self.btn_copy.clicked.connect(self._copy_translation)
         header_layout.addWidget(self.btn_copy)
 
+        # Quick OCR single block button
+        self.btn_ocr = QPushButton("🔍")
+        self.btn_ocr.setFixedWidth(28)
+        self.btn_ocr.setToolTip("Run OCR on this block")
+        self.btn_ocr.setStyleSheet(
+            "padding: 2px; font-size: 11px; background: #0f766e; color: white; border-radius: 4px;"
+        )
+        self.btn_ocr.clicked.connect(self._emit_ocr_requested)
+        header_layout.addWidget(self.btn_ocr)
+
+        # Quick Translate single block button
         self.btn_trans_single = QPushButton("⚡")
         self.btn_trans_single.setFixedWidth(28)
         self.btn_trans_single.setToolTip("Translate this block")
         self.btn_trans_single.setStyleSheet(
             "padding: 2px; font-size: 11px; background: #0284c7; color: white; border-radius: 4px;"
         )
-        # Use bound slot via setProperty to avoid lambda-capture lifecycle risk
         self.btn_trans_single.clicked.connect(self._emit_translate_requested)
         header_layout.addWidget(self.btn_trans_single)
+
+        # Delete single block button
+        self.btn_del = QPushButton("🗑")
+        self.btn_del.setFixedWidth(28)
+        self.btn_del.setToolTip("Delete this block")
+        self.btn_del.setStyleSheet(
+            "padding: 2px; font-size: 11px; background: #881337; color: #fecdd3; border-radius: 4px;"
+        )
+        self.btn_del.clicked.connect(self._emit_delete_requested)
+        header_layout.addWidget(self.btn_del)
 
         layout.addLayout(header_layout)
 
@@ -162,6 +204,33 @@ class BlockRowCard(QFrame):
         """Bound slot — avoids lambda capturing self in a signal."""
         self.translate_requested.emit(self.block_idx)
 
+    def _emit_ocr_requested(self) -> None:
+        """Bound slot for OCR request."""
+        self.ocr_requested.emit(self.block_idx)
+
+    def _emit_delete_requested(self) -> None:
+        """Bound slot for Delete request."""
+        self.delete_requested.emit(self.block_idx)
+
+    def _emit_style_requested(self) -> None:
+        """Bound slot for applying page style to this block."""
+        self.style_requested.emit(self.block_idx)
+
+    def _on_commit_timeout(self) -> None:
+        """Emit committed text changes for undo stack registration."""
+        cur_orig = self.txt_original.toPlainText()
+        if cur_orig != self._initial_orig:
+            old_lines = self._initial_orig.split('\n')
+            new_lines = cur_orig.split('\n')
+            self._initial_orig = cur_orig
+            self.text_committed.emit(self.block_idx, 'text', old_lines, new_lines)
+
+        cur_trans = self.txt_translated.toPlainText()
+        if cur_trans != self._initial_trans:
+            old_trans = self._initial_trans
+            self._initial_trans = cur_trans
+            self.text_committed.emit(self.block_idx, 'translation', old_trans, cur_trans)
+
     def _copy_translation(self) -> None:
         text = self.txt_translated.toPlainText()
         if text:
@@ -201,6 +270,9 @@ class BlockRowCard(QFrame):
                 self.txt_original.setPlainText(orig_str)
             if self.txt_translated.toPlainText() != trans_str:
                 self.txt_translated.setPlainText(trans_str)
+
+            self._initial_orig = orig_str
+            self._initial_trans = trans_str
         finally:
             self._updating_ui = False
         self._resize_editors()
@@ -231,6 +303,7 @@ class BlockRowCard(QFrame):
         elif isinstance(self.block, dict):
             self.block['text'] = lines
         self.text_modified.emit(self.block_idx)
+        self._commit_timer.start()
 
     def _on_translated_changed(self) -> None:
         if self._updating_ui:
@@ -244,6 +317,7 @@ class BlockRowCard(QFrame):
             self.block['translation'] = val
             self.block['rich_text'] = ""
         self.text_modified.emit(self.block_idx)
+        self._commit_timer.start()
 
     # ── Selection / style ────────────────────────────────────────────────────
 
@@ -278,12 +352,19 @@ class BlockRowCard(QFrame):
 
 
 class SideTextPanel(QWidget):
-    """Side panel with search, block count badge, translator controls, and scrollable block cards."""
+    """Side panel with search, block count badge, OCR and translator controls, and scrollable block cards."""
 
     block_selected = Signal(int)
     text_modified = Signal(int)
+    text_committed = Signal(int, str, object, object)
     translate_page_requested = Signal(str, str, str)       # (engine, src, tgt)
     translate_block_requested = Signal(int, str, str, str)  # (block_idx, engine, src, tgt)
+    ocr_page_requested = Signal(str)                       # (ocr_engine)
+    ocr_block_requested = Signal(int, str)                 # (block_idx, ocr_engine)
+    add_box_clicked = Signal()
+    delete_block_requested = Signal(int)
+    style_block_requested = Signal(int)
+    sync_style_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -297,11 +378,27 @@ class SideTextPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        # ── Header with block count badge ────────────────────────────────────
+        # ── Header with block count badge and Box action buttons ─────────────
         hdr_row = QHBoxLayout()
         lbl_header = QLabel("📋 Dialogue Blocks")
         lbl_header.setStyleSheet("font-size: 14px; font-weight: bold; color: #f8fafc;")
         hdr_row.addWidget(lbl_header, stretch=1)
+
+        self.btn_sync_style = QPushButton("🎨 Style")
+        self.btn_sync_style.setToolTip("Sync dialogue font style (font, stroke, colors) across blocks")
+        self.btn_sync_style.setStyleSheet(
+            "background-color: #6d28d9; color: white; font-weight: bold; border-radius: 4px; padding: 2px 8px;"
+        )
+        self.btn_sync_style.clicked.connect(self.sync_style_requested.emit)
+        hdr_row.addWidget(self.btn_sync_style)
+
+        self.btn_add_box = QPushButton("+ Add Box")
+        self.btn_add_box.setToolTip("Click and drag on canvas to create a new text box")
+        self.btn_add_box.setStyleSheet(
+            "background-color: #0369a1; color: white; font-weight: bold; border-radius: 4px; padding: 2px 8px;"
+        )
+        self.btn_add_box.clicked.connect(self.add_box_clicked.emit)
+        hdr_row.addWidget(self.btn_add_box)
 
         self.lbl_count = QLabel("0 blocks")
         self.lbl_count.setStyleSheet(
@@ -321,7 +418,7 @@ class SideTextPanel(QWidget):
         self.search_bar.textChanged.connect(self._apply_filter)
         layout.addWidget(self.search_bar)
 
-        # ── Translator controls ──────────────────────────────────────────────
+        # ── OCR & Translator controls ────────────────────────────────────────
         ctrl_box = QFrame()
         ctrl_box.setStyleSheet(
             "background-color: #1e293b; border-radius: 6px; border: 1px solid #334155;"
@@ -330,16 +427,51 @@ class SideTextPanel(QWidget):
         ctrl_layout.setContentsMargins(8, 8, 8, 8)
         ctrl_layout.setSpacing(6)
 
-        # Engine selector
+        # OCR Controls Row
+        ocr_row = QHBoxLayout()
+        lbl_ocr = QLabel("OCR:")
+        lbl_ocr.setStyleSheet("color: #2dd4bf; font-size: 12px; font-weight: bold;")
+        self.combo_ocr_engine = QComboBox()
+        if OCR_ENGINE_LIST:
+            for engine in OCR_ENGINE_LIST:
+                self.combo_ocr_engine.addItem(engine)
+        else:
+            self.combo_ocr_engine.addItem("⚠ OCR not available")
+            self.combo_ocr_engine.setEnabled(False)
+        ocr_row.addWidget(lbl_ocr)
+        ocr_row.addWidget(self.combo_ocr_engine, stretch=1)
+
+        self.btn_ocr_sel = QPushButton("🔍 OCR Selected")
+        self.btn_ocr_sel.setStyleSheet(
+            "background-color: #0f766e; color: white; font-weight: bold; border-radius: 4px; padding: 3px 6px;"
+        )
+        self.btn_ocr_sel.clicked.connect(self._on_ocr_selected)
+        ocr_row.addWidget(self.btn_ocr_sel)
+
+        self.btn_ocr_page = QPushButton("🔍 OCR Page")
+        self.btn_ocr_page.setStyleSheet(
+            "background-color: #115e59; color: white; font-weight: bold; border-radius: 4px; padding: 3px 6px;"
+        )
+        self.btn_ocr_page.clicked.connect(self._on_ocr_page)
+        ocr_row.addWidget(self.btn_ocr_page)
+
+        ctrl_layout.addLayout(ocr_row)
+
+        # Separator line
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background-color: #334155; max-height: 1px;")
+        ctrl_layout.addWidget(sep)
+
+        # Translator Engine selector
         t_row = QHBoxLayout()
-        lbl_engine = QLabel("Engine:")
-        lbl_engine.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        lbl_engine = QLabel("Translate:")
+        lbl_engine.setStyleSheet("color: #38bdf8; font-size: 12px; font-weight: bold;")
         self.combo_engine = QComboBox()
         if TRANSLATOR_LIST:
             for engine in TRANSLATOR_LIST:
                 self.combo_engine.addItem(engine)
         else:
-            # Modules unavailable — show a placeholder and disable
             self.combo_engine.addItem("⚠ Modules not available")
             self.combo_engine.setEnabled(False)
         t_row.addWidget(lbl_engine)
@@ -364,7 +496,7 @@ class SideTextPanel(QWidget):
         lang_row.addWidget(self.combo_tgt)
         ctrl_layout.addLayout(lang_row)
 
-        # Action buttons
+        # Translation Action buttons
         btn_row = QHBoxLayout()
         self.btn_trans_sel = QPushButton("⚡ Translate Selected")
         self.btn_trans_sel.setStyleSheet(
@@ -432,7 +564,11 @@ class SideTextPanel(QWidget):
                 card = BlockRowCard(block_idx=i, block=blocks[i])
                 card.selected.connect(self._on_card_selected)
                 card.text_modified.connect(self.text_modified.emit)
+                card.text_committed.connect(self.text_committed.emit)
                 card.translate_requested.connect(self._on_single_block_translate)
+                card.ocr_requested.connect(self._on_single_block_ocr)
+                card.delete_requested.connect(self.delete_block_requested.emit)
+                card.style_requested.connect(self.style_block_requested.emit)
                 self.cards.append(card)
                 # Insert before the trailing stretch (last item)
                 self.container_layout.insertWidget(i, card)
@@ -449,7 +585,7 @@ class SideTextPanel(QWidget):
         """Show or hide the 'no blocks' placeholder label."""
         if show:
             if self._empty_label is None:
-                self._empty_label = QLabel("No dialogue text blocks on this page.")
+                self._empty_label = QLabel("No dialogue text blocks on this page.\nClick '+ Add Box' to create one.")
                 self._empty_label.setStyleSheet("color: #64748b; font-style: italic; padding: 16px;")
                 self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.container_layout.insertWidget(0, self._empty_label)
@@ -486,6 +622,18 @@ class SideTextPanel(QWidget):
         """Show/hide cards based on the search query."""
         for card in self.cards:
             card.setVisible(card.matches_filter(query) if query else True)
+
+    # ── OCR actions ──────────────────────────────────────────────────────────
+
+    def _on_ocr_page(self) -> None:
+        self.ocr_page_requested.emit(self.combo_ocr_engine.currentText())
+
+    def _on_ocr_selected(self) -> None:
+        if self.selected_block_idx >= 0:
+            self._on_single_block_ocr(self.selected_block_idx)
+
+    def _on_single_block_ocr(self, idx: int) -> None:
+        self.ocr_block_requested.emit(idx, self.combo_ocr_engine.currentText())
 
     # ── Translation actions ───────────────────────────────────────────────────
 

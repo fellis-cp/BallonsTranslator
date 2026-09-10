@@ -14,5 +14,7 @@ if [ -z "$PYTHON" ]; then
     fi
 fi
 
+cd "$WORKSPACE_DIR" || exit 1
+
 exec "$PYTHON" "$SCRIPT_DIR/launch_reader.py" "$@"
 

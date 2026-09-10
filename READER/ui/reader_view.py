@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import os
 import os.path as osp
 import logging
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 
 
 from qtpy.QtWidgets import (
@@ -24,9 +26,26 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt, Signal, QTimer
 from qtpy.QtGui import QKeySequence, QKeyEvent, QFont
 
+try:
+    from qtpy.QtWidgets import QUndoStack
+except ImportError:
+    from qtpy.QtGui import QUndoStack
+
 from READER.core.loader import MangaProjectData, load_manga_project
 from READER.core.favorites import FAVORITES
-from READER.core.translation_worker import TranslationTaskWorker
+from READER.core.translation_worker import TranslationTaskWorker, OCRTaskWorker
+from READER.core.style_utils import (
+    get_reference_fontformat,
+    apply_fontformat_to_block,
+    copy_fontformat,
+)
+from READER.ui.undo_commands import (
+    AddBlockCommand,
+    DeleteBlockCommand,
+    MoveResizeBlockCommand,
+    EditTextBlockCommand,
+    ApplyStyleCommand,
+)
 from READER.ui.manga_canvas import MangaCanvas, OverlayMode, FitMode
 from READER.ui.text_panel import SideTextPanel
 from READER.ui.loading_overlay import LoadingOverlay
@@ -35,7 +54,7 @@ LOGGER = logging.getLogger('READER.reader_view')
 
 
 class ReaderView(QWidget):
-    """Full-featured manga page viewer panel with toolbar controls, side-by-side text editor, verification status, and translation task runner."""
+    """Full-featured manga page viewer panel with toolbar controls, side-by-side text editor, verification status, OCR runner, and translation task runner."""
 
     back_to_library = Signal()
     open_in_translator = Signal(str)  # emits manga_dir path
@@ -46,8 +65,12 @@ class ReaderView(QWidget):
         self.current_page_idx: int = 0
         self.right_to_left: bool = True  # Japanese Manga standard RTL reading
         self.worker: Optional[TranslationTaskWorker] = None
+        self.ocr_worker: Optional[OCRTaskWorker] = None
         self.progress_dialog: Optional[QProgressDialog] = None
         self.loading_overlay = LoadingOverlay(self)
+
+        self.undo_stack = QUndoStack(self)
+        self.undo_stack.cleanChanged.connect(self._on_undo_clean_changed)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -82,9 +105,23 @@ class ReaderView(QWidget):
         self.combo_status.currentIndexChanged.connect(self._on_status_changed)
         top_layout.addWidget(self.combo_status)
 
+        # Interactive Box Add Mode Toggle Button
+        self.btn_add_box = QPushButton("➕ Add Box")
+        self.btn_add_box.setCheckable(True)
+        self.btn_add_box.setToolTip("Click to toggle drag-and-draw mode for creating new speech bubbles")
+        self.btn_add_box.clicked.connect(self._toggle_add_box_mode)
+        top_layout.addWidget(self.btn_add_box)
+
+        # OCR Action Button
+        self.btn_ocr_page = QPushButton("🔍 OCR Page")
+        self.btn_ocr_page.setToolTip("Run text recognition on current page text blocks")
+        self.btn_ocr_page.setStyleSheet("background-color: #0f766e; color: white; font-weight: bold;")
+        self.btn_ocr_page.clicked.connect(self.ocr_current_page)
+        top_layout.addWidget(self.btn_ocr_page)
+
         # Translation Pipeline Action Buttons
         self.btn_trans_page = QPushButton("⚡ Translate Page")
-        self.btn_trans_page.setToolTip("Run OCR & Translator pipeline on current page")
+        self.btn_trans_page.setToolTip("Run Translator on current page")
         self.btn_trans_page.clicked.connect(self.translate_current_page)
         top_layout.addWidget(self.btn_trans_page)
 
@@ -113,7 +150,7 @@ class ReaderView(QWidget):
 
         layout.addWidget(self.top_bar)
 
-        # Sub-Control Bar (Row 2: Overlay, View Modes, Side Panel & Zoom)
+        # Sub-Control Bar (Row 2: Overlay, View Modes, Side Panel, Undo/Redo & Zoom)
         self.sub_bar = QFrame()
         self.sub_bar.setObjectName("ReaderControlBar")
         sub_layout = QHBoxLayout(self.sub_bar)
@@ -140,6 +177,27 @@ class ReaderView(QWidget):
         self.btn_toggle_panel.setToolTip("Toggle Side-by-Side Original & Translated Text Panel")
         self.btn_toggle_panel.clicked.connect(self._toggle_side_panel)
         sub_layout.addWidget(self.btn_toggle_panel)
+
+        # Undo / Redo Buttons
+        self.btn_undo = QPushButton("↶ Undo")
+        self.btn_undo.setToolTip("Undo last change (Ctrl+Z)")
+        self.btn_undo.setEnabled(False)
+        self.btn_undo.clicked.connect(self.undo_stack.undo)
+        self.undo_stack.canUndoChanged.connect(self.btn_undo.setEnabled)
+        sub_layout.addWidget(self.btn_undo)
+
+        self.btn_redo = QPushButton("↷ Redo")
+        self.btn_redo.setToolTip("Redo last undone change (Ctrl+Y / Ctrl+Shift+Z)")
+        self.btn_redo.setEnabled(False)
+        self.btn_redo.clicked.connect(self.undo_stack.redo)
+        self.undo_stack.canRedoChanged.connect(self.btn_redo.setEnabled)
+        sub_layout.addWidget(self.btn_redo)
+
+        # Style Sync Button
+        self.btn_sync_style = QPushButton("🎨 Sync Style")
+        self.btn_sync_style.setToolTip("Apply active manga dialogue style to all blocks on current page")
+        self.btn_sync_style.clicked.connect(lambda: self.sync_dialogue_style(None))
+        sub_layout.addWidget(self.btn_sync_style)
 
         # Fit Mode Controls
         self.btn_fit_screen = QPushButton("Fit Screen")
@@ -186,12 +244,21 @@ class ReaderView(QWidget):
         self.page_loading_bar.hide()
         layout.addWidget(self.page_loading_bar)
 
-        # Ctrl+S — save; Ctrl+T — translate current page
+        # Shortcuts: Ctrl+S, Ctrl+T, Ctrl+Z, Ctrl+Y, Ctrl+Shift+Z
         self.sc_save = QShortcut(QKeySequence("Ctrl+S"), self)
         self.sc_save.activated.connect(self.save_project)
 
         self.sc_translate = QShortcut(QKeySequence("Ctrl+T"), self)
         self.sc_translate.activated.connect(self.translate_current_page)
+
+        self.sc_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.sc_undo.activated.connect(self.undo_stack.undo)
+
+        self.sc_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.sc_redo.activated.connect(self.undo_stack.redo)
+
+        self.sc_redo_shift = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        self.sc_redo_shift.activated.connect(self.undo_stack.redo)
 
         # Debounce timer for verification-status saves (avoids save-on-every-scroll)
         self._status_save_timer = QTimer(self)
@@ -255,8 +322,29 @@ class ReaderView(QWidget):
 
         # Connect Canvas & Side Panel Signals
         self.canvas.block_clicked.connect(self.side_panel.select_block)
+        self.canvas.block_added.connect(self._on_block_added)
+        self.canvas.delete_block_requested.connect(self._on_delete_block_requested)
+        self.canvas.block_geometry_committed.connect(self._on_block_geometry_committed)
+        self.canvas.block_text_committed.connect(self._on_block_text_committed)
+        self.canvas.block_modified.connect(self._on_block_modified)
+        self.canvas.apply_style_requested.connect(self.sync_dialogue_style)
+        self.canvas.apply_style_page_requested.connect(lambda: self.sync_dialogue_style(None))
+        self.canvas.undo_requested.connect(self.undo_stack.undo)
+        self.canvas.redo_requested.connect(self.undo_stack.redo)
+        self.canvas.add_box_mode_changed.connect(self._on_add_box_mode_changed)
+        self.canvas.ocr_requested.connect(self._on_canvas_ocr_block)
+        self.canvas.translate_requested.connect(self._on_canvas_translate_block)
+        self.canvas.ocr_page_requested.connect(self.ocr_current_page)
+        self.canvas.translate_page_requested.connect(self.translate_current_page)
         self.side_panel.block_selected.connect(self.canvas.highlight_block)
         self.side_panel.text_modified.connect(self._on_text_modified)
+        self.side_panel.text_committed.connect(self._on_block_text_committed)
+        self.side_panel.add_box_clicked.connect(self._toggle_add_box_mode)
+        self.side_panel.delete_block_requested.connect(self._on_delete_block_requested)
+        self.side_panel.style_block_requested.connect(self.sync_dialogue_style)
+        self.side_panel.sync_style_requested.connect(lambda: self.sync_dialogue_style(None))
+        self.side_panel.ocr_page_requested.connect(self._on_panel_ocr_page)
+        self.side_panel.ocr_block_requested.connect(self._on_panel_ocr_block)
         self.side_panel.translate_page_requested.connect(self._on_panel_translate_page)
         self.side_panel.translate_block_requested.connect(self._on_panel_translate_block)
 
@@ -272,6 +360,8 @@ class ReaderView(QWidget):
         QApplication.processEvents()
         try:
             self.project_data = load_manga_project(manga_dir, json_path=json_path)
+            self.undo_stack.clear()
+            self.canvas.set_project_data(self.project_data)
             self.lbl_title.setText(self.project_data.title)
 
             # Update favorite icon state
@@ -297,6 +387,192 @@ class ReaderView(QWidget):
         """Toggle visibility of the side-by-side text panel."""
         self.side_panel.setVisible(not self.side_panel.isVisible())
 
+    def _toggle_add_box_mode(self) -> None:
+        """Toggle drawing text boxes on canvas."""
+        new_mode = not self.canvas.add_box_mode
+        self.canvas.set_add_box_mode(new_mode)
+
+    def _on_add_box_mode_changed(self, enabled: bool) -> None:
+        self.btn_add_box.setChecked(enabled)
+        if enabled:
+            self.btn_add_box.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold;")
+        else:
+            self.btn_add_box.setStyleSheet("")
+
+    def _on_undo_clean_changed(self, is_clean: bool) -> None:
+        if self.project_data:
+            if is_clean:
+                self.lbl_title.setText(self.project_data.title)
+            else:
+                self.lbl_title.setText(f"{self.project_data.title}  (Modified *)")
+
+    def _on_block_added(self, block_idx: int) -> None:
+        page = self.project_data.get_page(self.current_page_idx) if self.project_data else self.canvas._current_page
+        if page and page.blocks and 0 <= block_idx < len(page.blocks):
+            blk = page.blocks[block_idx]
+            cmd = AddBlockCommand(self, self.current_page_idx, block_idx, blk)
+            self.undo_stack.push(cmd)
+            self.side_panel.load_page_blocks(page)
+            self.side_panel.select_block(block_idx)
+            if self.project_data:
+                self.lbl_title.setText(f"{self.project_data.title}  (Modified *)")
+
+    def _on_delete_block_requested(self, block_idx: int) -> None:
+        page = self.project_data.get_page(self.current_page_idx) if self.project_data else self.canvas._current_page
+        if page and page.blocks and 0 <= block_idx < len(page.blocks):
+            blk = page.blocks[block_idx]
+            cmd = DeleteBlockCommand(self, self.current_page_idx, block_idx, blk)
+            self.undo_stack.push(cmd)
+
+    def _on_block_geometry_committed(self, block_idx: int, old_rect: List[int], new_rect: List[int]) -> None:
+        if old_rect == new_rect:
+            return
+        page = self.project_data.get_page(self.current_page_idx) if self.project_data else self.canvas._current_page
+        blk = page.blocks[block_idx] if (page and page.blocks and 0 <= block_idx < len(page.blocks)) else None
+        cmd = MoveResizeBlockCommand(self, self.current_page_idx, block_idx, old_rect, new_rect, block=blk)
+        self.undo_stack.push(cmd)
+
+    def _on_block_text_committed(self, block_idx: int, field: str, old_val: Any, new_val: Any) -> None:
+        if old_val == new_val:
+            return
+        page = self.project_data.get_page(self.current_page_idx) if self.project_data else self.canvas._current_page
+        blk = page.blocks[block_idx] if (page and page.blocks and 0 <= block_idx < len(page.blocks)) else None
+        cmd = EditTextBlockCommand(self, self.current_page_idx, block_idx, field, old_val, new_val, block=blk)
+        self.undo_stack.push(cmd)
+
+    def sync_dialogue_style(self, block_idx: Optional[int] = None) -> None:
+        """Apply active manga dialogue style to a single block or all blocks on current page."""
+        if not self.project_data:
+            return
+        page = self.project_data.get_page(self.current_page_idx)
+        if not page or not page.blocks:
+            return
+
+        ref_fmt = get_reference_fontformat(
+            current_page=page,
+            project_data=self.project_data,
+        )
+        if ref_fmt is None:
+            QMessageBox.information(
+                self,
+                "No Style Found",
+                "Could not find an existing dialogue style to copy from.",
+            )
+            return
+
+        if block_idx is not None:
+            if not (0 <= block_idx < len(page.blocks)):
+                return
+            target_indices = [block_idx]
+        else:
+            target_indices = list(range(len(page.blocks)))
+
+        old_states = {}
+        blocks_map = {}
+        for idx in target_indices:
+            blk = page.blocks[idx]
+            blocks_map[idx] = blk
+            fmt = getattr(blk, 'fontformat', None)
+            if fmt is None and isinstance(blk, dict):
+                fmt = blk.get('fontformat')
+            rt = getattr(blk, 'rich_text', '')
+            if rt is None and isinstance(blk, dict):
+                rt = blk.get('rich_text', '')
+            old_states[idx] = (copy_fontformat(fmt), rt or '')
+
+        cmd = ApplyStyleCommand(
+            reader_view=self,
+            page_idx=self.current_page_idx,
+            target_indices=target_indices,
+            old_states=old_states,
+            new_format=ref_fmt,
+            blocks_map=blocks_map,
+        )
+        self.undo_stack.push(cmd)
+
+    def ensure_page(self, page_idx: int) -> None:
+        """Ensure the view is displaying page_idx for undo/redo commands."""
+        if self.project_data and 0 <= page_idx < self.project_data.page_count:
+            if self.current_page_idx != page_idx:
+                self._change_page_idx(page_idx)
+
+    def on_page_data_changed(self, select_idx: int = -1) -> None:
+        """Called by undo commands to refresh canvas and side panel.
+
+        Deferred to the next event-loop tick so that any in-progress mouse or
+        keyboard event that triggered the undo command fully completes before
+        scene items are destroyed and re-created by reload_current_page().
+        """
+        def _do() -> None:
+            page = self.project_data.get_page(self.current_page_idx) if self.project_data else self.canvas._current_page
+            if page:
+                self.canvas.reload_current_page()
+                self.side_panel.load_page_blocks(page)
+                if 0 <= select_idx < len(page.blocks or []):
+                    self.canvas.select_and_focus_block(select_idx)
+                    self.side_panel.select_block(select_idx)
+            if self.project_data:
+                self.lbl_title.setText(f"{self.project_data.title}  (Modified *)")
+        QTimer.singleShot(0, _do)
+
+    def on_block_geometry_updated(self, block_idx: int) -> None:
+        """Called by MoveResizeBlockCommand to refresh canvas and side panel.
+
+        Deferred so that a move/resize mouseReleaseEvent chain fully exits
+        before scene items are replaced.
+        """
+        def _do() -> None:
+            page = self.project_data.get_page(self.current_page_idx) if self.project_data else self.canvas._current_page
+            if page and page.blocks and 0 <= block_idx < len(page.blocks):
+                self.canvas.reload_current_page()
+                if block_idx < len(self.side_panel.cards):
+                    card = self.side_panel.cards[block_idx]
+                    card.replace_block(block_idx, page.blocks[block_idx])
+                self.canvas.select_and_focus_block(block_idx)
+                self.side_panel.select_block(block_idx)
+            if self.project_data:
+                self.lbl_title.setText(f"{self.project_data.title}  (Modified *)")
+        QTimer.singleShot(0, _do)
+
+    def on_block_text_updated(self, block_idx: int) -> None:
+        """Called by EditTextBlockCommand to refresh canvas and side panel.
+
+        Deferred so that any text-editing event chain (keyboard or inline
+        canvas editor) fully exits before scene items are replaced.
+        """
+        def _do() -> None:
+            page = self.project_data.get_page(self.current_page_idx) if self.project_data else self.canvas._current_page
+            if page and page.blocks and 0 <= block_idx < len(page.blocks):
+                self.canvas.reload_current_page()
+                if block_idx < len(self.side_panel.cards):
+                    card = self.side_panel.cards[block_idx]
+                    card.replace_block(block_idx, page.blocks[block_idx])
+                self.canvas.select_and_focus_block(block_idx)
+                self.side_panel.select_block(block_idx)
+            if self.project_data:
+                self.lbl_title.setText(f"{self.project_data.title}  (Modified *)")
+        QTimer.singleShot(0, _do)
+
+    def _on_block_modified(self, block_idx: int) -> None:
+        """Handle live block movement, resizing, or text modifications on canvas."""
+        page = self.project_data.get_page(self.current_page_idx) if self.project_data else self.canvas._current_page
+        if page and page.blocks and 0 <= block_idx < len(page.blocks):
+            if block_idx < len(self.side_panel.cards):
+                card = self.side_panel.cards[block_idx]
+                card.replace_block(block_idx, page.blocks[block_idx])
+            if self.project_data:
+                self.lbl_title.setText(f"{self.project_data.title}  (Modified *)")
+
+    def _on_canvas_ocr_block(self, block_idx: int) -> None:
+        engine = self.side_panel.combo_ocr_engine.currentText()
+        self._on_panel_ocr_block(block_idx, engine)
+
+    def _on_canvas_translate_block(self, block_idx: int) -> None:
+        engine = self.side_panel.combo_engine.currentText()
+        src = self.side_panel.combo_src.currentText()
+        tgt = self.side_panel.combo_tgt.currentText()
+        self._on_panel_translate_block(block_idx, engine, src, tgt)
+
     def _toggle_favorite(self) -> None:
         if not self.project_data:
             return
@@ -317,7 +593,7 @@ class ReaderView(QWidget):
         self.save_project()
 
     def _on_text_modified(self, block_idx: int) -> None:
-        """Handle inline text edits from side panel."""
+        """Handle inline text edits from side panel live typing."""
         self.canvas.reload_current_page()
         if self.project_data:
             self.lbl_title.setText(f"{self.project_data.title}  (Modified *)")
@@ -328,10 +604,101 @@ class ReaderView(QWidget):
             return False
         success = self.project_data.save()
         if success:
+            self.undo_stack.setClean()
             original_title = self.project_data.title
             self.lbl_title.setText(f"{original_title}  (Saved ✓)")
             LOGGER.info(f"Saved project JSON: {self.project_data.json_path}")
         return success
+
+    # OCR Handlers
+    def ocr_current_page(self) -> None:
+        engine = self.side_panel.combo_ocr_engine.currentText()
+        self._on_panel_ocr_page(engine)
+
+    def _on_panel_ocr_page(self, engine: str) -> None:
+        if not self.project_data:
+            return
+        page = self.project_data.get_page(self.current_page_idx)
+        if page:
+            self._start_ocr_task(ocr_engine=engine)
+
+    def _on_panel_ocr_block(self, block_idx: int, engine: str) -> None:
+        if not self.project_data:
+            return
+        page = self.project_data.get_page(self.current_page_idx)
+        if page:
+            self._start_ocr_task(target_blocks=[block_idx], ocr_engine=engine)
+
+    def _start_ocr_task(
+        self,
+        target_blocks: Optional[List[int]] = None,
+        ocr_engine: str = "ppv6_onnx",
+    ) -> None:
+        if not self.project_data:
+            return
+        page = self.project_data.get_page(self.current_page_idx)
+        if not page or not page.blocks:
+            QMessageBox.information(self, "OCR", "No text blocks on this page to OCR. Use '+ Add Box' first.")
+            return
+
+        # Cancel any in-flight workers
+        if self.ocr_worker and self.ocr_worker.isRunning():
+            self.ocr_worker.request_cancel()
+            self.ocr_worker.wait()
+        if self.worker and self.worker.isRunning():
+            self.worker.request_cancel()
+            self.worker.wait()
+
+        target_indices = target_blocks if target_blocks is not None else list(range(len(page.blocks)))
+
+        self.loading_overlay.start_loading(
+            title=f"Running OCR ({ocr_engine})",
+            subtitle="Recognizing text in speech bubbles...",
+            total=len(target_indices)
+        )
+
+        self.ocr_worker = OCRTaskWorker(
+            image_path=page.image_path,
+            blocks=page.blocks,
+            target_block_indices=target_indices,
+            ocr_engine=ocr_engine,
+        )
+        self.ocr_worker.progress.connect(self._on_ocr_progress)
+        self.ocr_worker.block_finished.connect(self._on_ocr_block_finished)
+        self.ocr_worker.task_completed.connect(self._on_ocr_finished)
+        self.ocr_worker.start()
+
+    def _on_ocr_progress(self, current: int, total: int, msg: str) -> None:
+        self.loading_overlay.update_progress(value=current, total=total, subtitle=msg)
+
+    def _on_ocr_block_finished(self, block_idx: int, text: str) -> None:
+        if not self.project_data:
+            return
+        page = self.project_data.get_page(self.current_page_idx)
+        if page and 0 <= block_idx < len(page.blocks):
+            blk = page.blocks[block_idx]
+            if hasattr(blk, 'text'):
+                blk.text = text.split('\n') if text else []
+            elif isinstance(blk, dict):
+                blk['text'] = text.split('\n') if text else []
+
+            # Update side panel card in-place if available
+            if 0 <= block_idx < len(self.side_panel.cards):
+                self.side_panel.cards[block_idx].update_content()
+
+            self.lbl_title.setText(f"{self.project_data.title}  (Modified *)")
+
+    def _on_ocr_finished(self, success: bool, msg: str) -> None:
+        self.loading_overlay.stop_loading()
+        if self.project_data:
+            page = self.project_data.get_page(self.current_page_idx)
+            if page:
+                self.canvas.reload_current_page()
+                self.side_panel.load_page_blocks(page)
+            # Auto-save recognized text to project JSON
+            self.save_project()
+        if not success:
+            QMessageBox.warning(self, "OCR Status", msg)
 
     # Translation Triggers
     def translate_current_page(self) -> None:
@@ -384,10 +751,16 @@ class ReaderView(QWidget):
         if not self.project_data:
             return
 
-        # Cancel any in-flight worker before starting a new one
+        # Ensure all in-memory edits & OCR results are persisted to disk first
+        self.save_project()
+
+        # Cancel any in-flight workers before starting a new one
         if self.worker and self.worker.isRunning():
             self.worker.request_cancel()
             self.worker.wait()
+        if self.ocr_worker and self.ocr_worker.isRunning():
+            self.ocr_worker.request_cancel()
+            self.ocr_worker.wait()
 
         pages = page_names or [p.page_name for p in self.project_data.pages]
 
@@ -417,11 +790,17 @@ class ReaderView(QWidget):
     def _on_trans_finished(self, success: bool, msg: str) -> None:
         self.loading_overlay.stop_loading()
         if success:
-            QMessageBox.information(self, "Translation Finished", msg)
             if self.project_data:
                 saved_idx = self.current_page_idx
-                self.load_manga(self.project_data.manga_dir, self.project_data.json_path)
-                self._change_page_idx(saved_idx)
+                self.project_data = load_manga_project(
+                    self.project_data.manga_dir,
+                    json_path=self.project_data.json_path
+                )
+                self.undo_stack.clear()
+                self.canvas.set_project_data(self.project_data)
+                self.lbl_title.setText(self.project_data.title)
+                self._show_page(saved_idx)
+            QMessageBox.information(self, "Translation Finished", msg)
         else:
             QMessageBox.warning(self, "Translation Status", msg)
 

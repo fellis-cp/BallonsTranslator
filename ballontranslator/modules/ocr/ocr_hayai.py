@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -12,7 +13,9 @@ from transformers import (
 from .base import DEVICE_SELECTOR, OCRBase, register_OCR
 
 
-MODEL_PATH = "data/models/hayai-ocr-v2"
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+_LOCAL_MODEL_DIR = _PACKAGE_ROOT / "data" / "models" / "hayai-ocr-v2"
+MODEL_PATH = str(_LOCAL_MODEL_DIR) if _LOCAL_MODEL_DIR.exists() else "data/models/hayai-ocr-v2"
 VISION_MODEL_ID = "google/siglip2-base-patch16-naflex"
 
 

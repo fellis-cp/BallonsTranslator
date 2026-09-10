@@ -6,7 +6,9 @@ import torch
 
 from .base import OCRBase, register_OCR, DEFAULT_DEVICE, DEVICE_SELECTOR, TextBlock
 
-MODEL_PATH = 'data/models/PaddleOCR-VL-For-Manga'
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+_LOCAL_MODEL_DIR = _PACKAGE_ROOT / 'data' / 'models' / 'PaddleOCR-VL-For-Manga'
+MODEL_PATH = str(_LOCAL_MODEL_DIR) if _LOCAL_MODEL_DIR.exists() else 'data/models/PaddleOCR-VL-For-Manga'
 MODEL_DIR = Path(MODEL_PATH)
 
 

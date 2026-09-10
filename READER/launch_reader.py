@@ -26,6 +26,8 @@ if venv_python.exists() and os.environ.get("READER_VENV_SWITCHED") != "1":
 if str(WORKSPACE_DIR) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_DIR))
 
+# Ensure CWD is always the workspace root so data/models paths resolve properly
+os.chdir(str(WORKSPACE_DIR))
 
 
 def main() -> int:
