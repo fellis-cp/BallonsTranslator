@@ -1,5 +1,6 @@
 import os
 import os.path as osp
+import re
 import subprocess
 import sys
 from typing import List, Optional, Dict
@@ -25,6 +26,15 @@ from qtpy.QtGui import QPixmap, QCursor
 from READER.core.scanner import MangaItem, scan_translated_directory
 from READER.core.favorites import FAVORITES
 from READER.ui.loading_overlay import LoadingOverlay
+
+
+def _natural_sort_key(text: str) -> list:
+    """Sort strings containing numbers in human/natural order (e.g. 1, 2, ... 9, 10).
+
+    >>> _natural_sort_key("Chapter 2") < _natural_sort_key("Chapter 10")
+    True
+    """
+    return [int(token) if token.isdigit() else token.lower() for token in re.split(r"(\d+)", text)]
 
 
 # ── Background thumbnail loader ───────────────────────────────────────────────
@@ -326,6 +336,7 @@ class LibraryView(QWidget):
         self._view_mode: str = self._VIEW_AUTHORS
         self._active_author: str = ""          # lowercase key
         self._active_author_display: str = ""  # original-casing label
+        self._author_scroll_pos: int = 0       # saved vertical scroll position in author view
 
         self._thumb_loader: Optional[ThumbnailLoaderThread] = None
 
@@ -385,7 +396,7 @@ class LibraryView(QWidget):
         toolbar1.addWidget(self.search_edit, stretch=2)
 
         self.sort_combo = QComboBox()
-        self.sort_combo.addItems(["Recently Added", "Title A-Z", "Page Count"])
+        self.sort_combo.addItems(["Recently Added", "Title (1-9, A-Z)", "Page Count"])
         self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         toolbar1.addWidget(self.sort_combo, stretch=1)
 
@@ -522,7 +533,10 @@ class LibraryView(QWidget):
                 author_variants.setdefault(key, {})
                 author_variants[key][item.author] = author_variants[key].get(item.author, 0) + 1
 
-            for key, manga_list in sorted(author_groups_ci.items()):
+            for key, manga_list in sorted(
+                author_groups_ci.items(),
+                key=lambda kv: _natural_sort_key(kv[0]),
+            ):
                 display_name = max(
                     author_variants[key],
                     key=lambda v: (author_variants[key][v], v),
@@ -537,6 +551,7 @@ class LibraryView(QWidget):
             self._view_mode = self._VIEW_AUTHORS
             self._active_author = ""
             self._active_author_display = ""
+            self._author_scroll_pos = 0
             self._apply_sort()
             self._relayout()
             self._start_thumb_loader()
@@ -553,6 +568,8 @@ class LibraryView(QWidget):
 
     def _show_manga_for_author(self, author: str) -> None:
         """Drill into the manga grid for a specific author."""
+        if self._view_mode == self._VIEW_AUTHORS:
+            self._author_scroll_pos = self.scroll_area.verticalScrollBar().value()
         self._view_mode = self._VIEW_MANGA
         self._active_author = author.lower()
         self._active_author_display = author
@@ -588,7 +605,9 @@ class LibraryView(QWidget):
         self.toolbar2.hide()
         self.search_edit.clear()
         self._relayout()
-        self.scroll_area.verticalScrollBar().setValue(0)
+        pos = self._author_scroll_pos
+        self.scroll_area.verticalScrollBar().setValue(pos)
+        QTimer.singleShot(0, lambda: self.scroll_area.verticalScrollBar().setValue(pos))
 
     # ── Sort ──────────────────────────────────────────────────────────────────
 
@@ -599,14 +618,14 @@ class LibraryView(QWidget):
     def _apply_sort(self) -> None:
         sort_mode = self.sort_combo.currentText()
         # Sort manga cards
-        if sort_mode == "Title A-Z":
-            self._all_manga_cards.sort(key=lambda c: c.item.title.lower())
+        if "Title" in sort_mode:
+            self._all_manga_cards.sort(key=lambda c: _natural_sort_key(c.item.title))
         elif sort_mode == "Page Count":
             self._all_manga_cards.sort(key=lambda c: c.item.page_count, reverse=True)
         else:
             self._all_manga_cards.sort(key=lambda c: c.item.mtime, reverse=True)
-        # Sort author cards by name
-        self._author_cards.sort(key=lambda c: c.author.lower())
+        # Sort author cards naturally by name
+        self._author_cards.sort(key=lambda c: _natural_sort_key(c.author))
 
     # ── Layout (show/hide only — no widget creation) ──────────────────────────
 
@@ -735,6 +754,7 @@ class LibraryView(QWidget):
                 p.setChecked(key == status)
             # In author view: switch to flat manga view (no author restriction)
             if self._view_mode == self._VIEW_AUTHORS:
+                self._author_scroll_pos = self.scroll_area.verticalScrollBar().value()
                 self._view_mode = self._VIEW_MANGA
                 # _active_author stays empty = show all authors
                 self.breadcrumb_bar.show()
