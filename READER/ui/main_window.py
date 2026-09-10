@@ -105,10 +105,12 @@ class ReaderMainWindow(QMainWindow):
 
     def open_manga_item(self, item: MangaItem) -> None:
         self.reader_view.load_manga(item.path, json_path=item.json_path)
+        self.header.hide()  # Maximise reading area
         self.stack.setCurrentIndex(1)
 
     def open_manga_by_path(self, manga_path: str) -> None:
         self.reader_view.load_manga(manga_path)
+        self.header.hide()
         self.stack.setCurrentIndex(1)
 
     def toggle_fullscreen(self) -> None:

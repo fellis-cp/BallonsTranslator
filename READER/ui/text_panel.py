@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Any
 
 from qtpy.QtWidgets import (
     QWidget,
@@ -11,26 +11,27 @@ from qtpy.QtWidgets import (
     QComboBox,
     QScrollArea,
     QPlainTextEdit,
-    QSplitter,
-    QStyle,
+    QLineEdit,
     QApplication,
+    QSizePolicy,
 )
-from qtpy.QtCore import Qt, Signal
+from qtpy.QtCore import Qt, Signal, QSize
 
 from READER.core.loader import MangaPage
 
 LOGGER = logging.getLogger('READER.text_panel')
 
 HAS_TRANSLATORS = False
-TRANSLATOR_LIST = ["Gemini Playwright", "google", "Copy Source", "LLMTranslator"]
+# Only populated with real keys after successful import; empty = modules unavailable
+TRANSLATOR_LIST: List[str] = []
 try:
-    import ballontranslator.modules.translators.trans_playwrigt as _tp
+    import ballontranslator.modules.translators.trans_playwrigt as _tp  # noqa: F401
     from ballontranslator.modules.translators.base import TRANSLATORS
     HAS_TRANSLATORS = True
     available_keys = list(TRANSLATORS.module_dict.keys())
     if available_keys:
         TRANSLATOR_LIST = available_keys
-        # Ensure Gemini Playwright is first if present
+        # Keep Gemini Playwright first when present
         if "Gemini Playwright" in TRANSLATOR_LIST:
             TRANSLATOR_LIST.remove("Gemini Playwright")
             TRANSLATOR_LIST.insert(0, "Gemini Playwright")
@@ -39,7 +40,7 @@ except ImportError:
 
 
 class BlockRowCard(QFrame):
-    """Side-by-side text block row showing original and translated text side-by-side."""
+    """Side-by-side editable card for one text block (original + translation)."""
 
     selected = Signal(int)
     text_modified = Signal(int)
@@ -55,12 +56,14 @@ class BlockRowCard(QFrame):
         self.setObjectName("BlockRowCard")
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Allow the card to shrink/grow vertically with content
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
 
-        # Header Row: Block Number, Info, Single-Block Translate
+        # ── Header row ──────────────────────────────────────────────────────
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -71,7 +74,7 @@ class BlockRowCard(QFrame):
         rect_str = ""
         if hasattr(block, 'xyxy') and block.xyxy:
             x1, y1, x2, y2 = block.xyxy
-            rect_str = f"({int(x1)}, {int(y1)}) {int(x2-x1)}x{int(y2-y1)}px"
+            rect_str = f"({int(x1)}, {int(y1)}) {int(x2-x1)}×{int(y2-y1)}px"
         elif isinstance(block, dict):
             rect = block.get('_bounding_rect') or block.get('xyxy') or []
             if len(rect) == 4:
@@ -81,63 +84,105 @@ class BlockRowCard(QFrame):
         self.lbl_info.setStyleSheet("color: #94a3b8; font-size: 11px;")
         header_layout.addWidget(self.lbl_info, stretch=1)
 
-        self.btn_trans_single = QPushButton("⚡ Translate Block")
-        self.btn_trans_single.setStyleSheet(
-            "padding: 2px 8px; font-size: 11px; background: #0284c7; color: white; border-radius: 4px;"
+        # Copy translated text button
+        self.btn_copy = QPushButton("📋")
+        self.btn_copy.setFixedWidth(28)
+        self.btn_copy.setToolTip("Copy translation to clipboard")
+        self.btn_copy.setStyleSheet(
+            "padding: 2px; font-size: 11px; background: #1e293b; border: 1px solid #334155;"
+            " border-radius: 4px; color: #94a3b8;"
         )
-        self.btn_trans_single.clicked.connect(lambda: self.translate_requested.emit(self.block_idx))
+        self.btn_copy.clicked.connect(self._copy_translation)
+        header_layout.addWidget(self.btn_copy)
+
+        self.btn_trans_single = QPushButton("⚡")
+        self.btn_trans_single.setFixedWidth(28)
+        self.btn_trans_single.setToolTip("Translate this block")
+        self.btn_trans_single.setStyleSheet(
+            "padding: 2px; font-size: 11px; background: #0284c7; color: white; border-radius: 4px;"
+        )
+        # Use bound slot via setProperty to avoid lambda-capture lifecycle risk
+        self.btn_trans_single.clicked.connect(self._emit_translate_requested)
         header_layout.addWidget(self.btn_trans_single)
 
         layout.addLayout(header_layout)
 
-        # Side-by-side Editors Layout
+        # ── Side-by-side editors ─────────────────────────────────────────────
         editors_layout = QHBoxLayout()
         editors_layout.setSpacing(10)
 
-        # Original Text Column
+        # Original column
         orig_col = QVBoxLayout()
         orig_col.setSpacing(2)
-        lbl_orig = QLabel("Original Text")
+        lbl_orig = QLabel("Original")
         lbl_orig.setStyleSheet("color: #a1a1aa; font-size: 11px; font-weight: bold;")
         orig_col.addWidget(lbl_orig)
 
         self.txt_original = QPlainTextEdit()
-        self.txt_original.setPlaceholderText("Original text...")
-        self.txt_original.setMaximumHeight(85)
+        self.txt_original.setPlaceholderText("Original text…")
+        self.txt_original.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.txt_original.setStyleSheet(
-            "background-color: #18181b; color: #f4f4f5; border: 1px solid #3f3f46; border-radius: 4px; padding: 4px;"
+            "background-color: #18181b; color: #f4f4f5;"
+            " border: 1px solid #3f3f46; border-radius: 4px; padding: 4px;"
         )
         orig_col.addWidget(self.txt_original)
         editors_layout.addLayout(orig_col, stretch=1)
 
-        # Translated Text Column
+        # Translated column
         trans_col = QVBoxLayout()
         trans_col.setSpacing(2)
-        lbl_trans = QLabel("Translated Text")
+        lbl_trans = QLabel("Translation")
         lbl_trans.setStyleSheet("color: #a1a1aa; font-size: 11px; font-weight: bold;")
         trans_col.addWidget(lbl_trans)
 
         self.txt_translated = QPlainTextEdit()
-        self.txt_translated.setPlaceholderText("Translated text...")
-        self.txt_translated.setMaximumHeight(85)
+        self.txt_translated.setPlaceholderText("Translated text…")
+        self.txt_translated.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.txt_translated.setStyleSheet(
-            "background-color: #18181b; color: #38bdf8; border: 1px solid #0284c7; border-radius: 4px; padding: 4px;"
+            "background-color: #18181b; color: #38bdf8;"
+            " border: 1px solid #0284c7; border-radius: 4px; padding: 4px;"
         )
         trans_col.addWidget(self.txt_translated)
         editors_layout.addLayout(trans_col, stretch=1)
 
         layout.addLayout(editors_layout)
 
-        # Connect text changes
         self.txt_original.textChanged.connect(self._on_original_changed)
         self.txt_translated.textChanged.connect(self._on_translated_changed)
+        # Auto-resize editors to content after every change
+        self.txt_original.document().contentsChanged.connect(self._resize_editors)
+        self.txt_translated.document().contentsChanged.connect(self._resize_editors)
 
-        # Populate content
         self.update_content()
         self._apply_style()
 
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _emit_translate_requested(self) -> None:
+        """Bound slot — avoids lambda capturing self in a signal."""
+        self.translate_requested.emit(self.block_idx)
+
+    def _copy_translation(self) -> None:
+        text = self.txt_translated.toPlainText()
+        if text:
+            QApplication.clipboard().setText(text)
+
+    def _resize_editors(self) -> None:
+        """Auto-fit editor height to content (min 3 lines, max 10 lines)."""
+        for editor in (self.txt_original, self.txt_translated):
+            doc = editor.document()
+            fm = editor.fontMetrics()
+            line_h = fm.lineSpacing()
+            margins = editor.contentsMargins()
+            v_margin = margins.top() + margins.bottom() + 8
+            lines = max(3, min(10, int(doc.size().height() / max(1, line_h))))
+            new_h = lines * line_h + v_margin
+            editor.setFixedHeight(new_h)
+
+    # ── Data I/O ─────────────────────────────────────────────────────────────
+
     def update_content(self) -> None:
-        """Update editor boxes from block object without triggering recursive signals."""
+        """Refresh editor text from the block object without triggering recursive signals."""
         self._updating_ui = True
         try:
             orig_str = ""
@@ -154,17 +199,33 @@ class BlockRowCard(QFrame):
 
             if self.txt_original.toPlainText() != orig_str:
                 self.txt_original.setPlainText(orig_str)
-
             if self.txt_translated.toPlainText() != trans_str:
                 self.txt_translated.setPlainText(trans_str)
         finally:
             self._updating_ui = False
+        self._resize_editors()
+
+    def replace_block(self, block_idx: int, block: Any) -> None:
+        """Update this card to display a different block in-place (avoids widget recreation)."""
+        self.block_idx = block_idx
+        self.block = block
+        self.lbl_idx.setText(f"Block #{block_idx + 1}")
+        rect_str = ""
+        if hasattr(block, 'xyxy') and block.xyxy:
+            x1, y1, x2, y2 = block.xyxy
+            rect_str = f"({int(x1)}, {int(y1)}) {int(x2-x1)}×{int(y2-y1)}px"
+        elif isinstance(block, dict):
+            rect = block.get('_bounding_rect') or block.get('xyxy') or []
+            if len(rect) == 4:
+                rect_str = f"({int(rect[0])}, {int(rect[1])})"
+        self.lbl_info.setText(rect_str)
+        self.set_selected(False)
+        self.update_content()
 
     def _on_original_changed(self) -> None:
         if self._updating_ui:
             return
-        text_val = self.txt_original.toPlainText()
-        lines = text_val.split('\n')
+        lines = self.txt_original.toPlainText().split('\n')
         if hasattr(self.block, 'text'):
             self.block.text = lines
         elif isinstance(self.block, dict):
@@ -174,16 +235,17 @@ class BlockRowCard(QFrame):
     def _on_translated_changed(self) -> None:
         if self._updating_ui:
             return
-        trans_val = self.txt_translated.toPlainText()
+        val = self.txt_translated.toPlainText()
         if hasattr(self.block, 'translation'):
-            self.block.translation = trans_val
-            # Clear rich_text so edited plain text takes precedence
+            self.block.translation = val
             if hasattr(self.block, 'rich_text'):
                 self.block.rich_text = ""
         elif isinstance(self.block, dict):
-            self.block['translation'] = trans_val
+            self.block['translation'] = val
             self.block['rich_text'] = ""
         self.text_modified.emit(self.block_idx)
+
+    # ── Selection / style ────────────────────────────────────────────────────
 
     def set_selected(self, val: bool) -> None:
         if self._is_selected != val:
@@ -193,60 +255,98 @@ class BlockRowCard(QFrame):
     def _apply_style(self) -> None:
         if self._is_selected:
             self.setStyleSheet(
-                "QFrame#BlockRowCard { background-color: #1e293b; border: 2px solid #0284c7; border-radius: 6px; }"
+                "QFrame#BlockRowCard { background-color: #1e293b;"
+                " border: 2px solid #0284c7; border-radius: 6px; }"
             )
         else:
             self.setStyleSheet(
-                "QFrame#BlockRowCard { background-color: #0f172a; border: 1px solid #334155; border-radius: 6px; }"
+                "QFrame#BlockRowCard { background-color: #0f172a;"
+                " border: 1px solid #334155; border-radius: 6px; }"
             )
 
     def mousePressEvent(self, event) -> None:
         self.selected.emit(self.block_idx)
         super().mousePressEvent(event)
 
+    def matches_filter(self, query: str) -> bool:
+        """Return True if either editor text contains *query* (case-insensitive)."""
+        q = query.lower()
+        return (
+            q in self.txt_original.toPlainText().lower()
+            or q in self.txt_translated.toPlainText().lower()
+        )
+
 
 class SideTextPanel(QWidget):
-    """Side panel displaying side-by-side text list and translation controls."""
+    """Side panel with search, block count badge, translator controls, and scrollable block cards."""
 
     block_selected = Signal(int)
     text_modified = Signal(int)
-    translate_page_requested = Signal(str, str, str)  # (translator_key, src_lang, tgt_lang)
-    translate_block_requested = Signal(int, str, str, str)  # (block_idx, translator_key, src_lang, tgt_lang)
+    translate_page_requested = Signal(str, str, str)       # (engine, src, tgt)
+    translate_block_requested = Signal(int, str, str, str)  # (block_idx, engine, src, tgt)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_page: Optional[MangaPage] = None
+        # Only BlockRowCard objects; _empty_label kept separately
         self.cards: List[BlockRowCard] = []
+        self._empty_label: Optional[QLabel] = None
         self.selected_block_idx: int = -1
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        # Header Title
-        lbl_header = QLabel("📋 Dialogue Text Blocks")
+        # ── Header with block count badge ────────────────────────────────────
+        hdr_row = QHBoxLayout()
+        lbl_header = QLabel("📋 Dialogue Blocks")
         lbl_header.setStyleSheet("font-size: 14px; font-weight: bold; color: #f8fafc;")
-        layout.addWidget(lbl_header)
+        hdr_row.addWidget(lbl_header, stretch=1)
 
-        # Control Panel Box (Translator Engine & Language Selectors)
+        self.lbl_count = QLabel("0 blocks")
+        self.lbl_count.setStyleSheet(
+            "font-size: 11px; color: #94a3b8; background: #1e293b;"
+            " border-radius: 8px; padding: 2px 8px;"
+        )
+        hdr_row.addWidget(self.lbl_count)
+        layout.addLayout(hdr_row)
+
+        # ── Search bar ───────────────────────────────────────────────────────
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("🔍 Filter blocks…")
+        self.search_bar.setStyleSheet(
+            "background: #18181b; color: #f4f4f5; border: 1px solid #334155;"
+            " border-radius: 6px; padding: 4px 8px;"
+        )
+        self.search_bar.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.search_bar)
+
+        # ── Translator controls ──────────────────────────────────────────────
         ctrl_box = QFrame()
-        ctrl_box.setStyleSheet("background-color: #1e293b; border-radius: 6px; border: 1px solid #334155;")
+        ctrl_box.setStyleSheet(
+            "background-color: #1e293b; border-radius: 6px; border: 1px solid #334155;"
+        )
         ctrl_layout = QVBoxLayout(ctrl_box)
         ctrl_layout.setContentsMargins(8, 8, 8, 8)
         ctrl_layout.setSpacing(6)
 
-        # Translator Selection Row
+        # Engine selector
         t_row = QHBoxLayout()
-        lbl_trans = QLabel("Engine:")
-        lbl_trans.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        lbl_engine = QLabel("Engine:")
+        lbl_engine.setStyleSheet("color: #94a3b8; font-size: 12px;")
         self.combo_engine = QComboBox()
-        for engine in TRANSLATOR_LIST:
-            self.combo_engine.addItem(engine)
-        t_row.addWidget(lbl_trans)
+        if TRANSLATOR_LIST:
+            for engine in TRANSLATOR_LIST:
+                self.combo_engine.addItem(engine)
+        else:
+            # Modules unavailable — show a placeholder and disable
+            self.combo_engine.addItem("⚠ Modules not available")
+            self.combo_engine.setEnabled(False)
+        t_row.addWidget(lbl_engine)
         t_row.addWidget(self.combo_engine, stretch=1)
         ctrl_layout.addLayout(t_row)
 
-        # Language Selectors Row
+        # Language selectors
         lang_row = QHBoxLayout()
         lbl_src = QLabel("From:")
         lbl_src.setStyleSheet("color: #94a3b8; font-size: 12px;")
@@ -264,18 +364,20 @@ class SideTextPanel(QWidget):
         lang_row.addWidget(self.combo_tgt)
         ctrl_layout.addLayout(lang_row)
 
-        # Page-Level Action Buttons Row
+        # Action buttons
         btn_row = QHBoxLayout()
         self.btn_trans_sel = QPushButton("⚡ Translate Selected")
         self.btn_trans_sel.setStyleSheet(
-            "background-color: #0284c7; color: white; font-weight: bold; border-radius: 4px; padding: 4px 8px;"
+            "background-color: #0284c7; color: white; font-weight: bold;"
+            " border-radius: 4px; padding: 4px 8px;"
         )
         self.btn_trans_sel.clicked.connect(self._on_translate_selected)
         btn_row.addWidget(self.btn_trans_sel)
 
         self.btn_trans_page = QPushButton("⚡ Translate Page")
         self.btn_trans_page.setStyleSheet(
-            "background-color: #2563eb; color: white; font-weight: bold; border-radius: 4px; padding: 4px 8px;"
+            "background-color: #2563eb; color: white; font-weight: bold;"
+            " border-radius: 4px; padding: 4px 8px;"
         )
         self.btn_trans_page.clicked.connect(self._on_translate_page)
         btn_row.addWidget(self.btn_trans_page)
@@ -283,7 +385,7 @@ class SideTextPanel(QWidget):
         ctrl_layout.addLayout(btn_row)
         layout.addWidget(ctrl_box)
 
-        # Scroll Area for Block Cards
+        # ── Scroll area for block cards ───────────────────────────────────────
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet(
@@ -299,69 +401,109 @@ class SideTextPanel(QWidget):
         self.scroll_area.setWidget(self.container_widget)
         layout.addWidget(self.scroll_area, stretch=1)
 
+    # ── Page loading (in-place diff) ─────────────────────────────────────────
+
     def load_page_blocks(self, page: MangaPage) -> None:
-        """Populate the side panel with cards for all textblocks on page."""
+        """Populate block cards using an in-place diff to avoid full widget recreation."""
+        self.current_page = page
+        self.selected_block_idx = -1
+        self.search_bar.blockSignals(True)
+        self.search_bar.clear()
+        self.search_bar.blockSignals(False)
+
+        blocks = page.blocks if (page and page.blocks) else []
+        self.lbl_count.setText(f"{len(blocks)} block{'s' if len(blocks) != 1 else ''}")
+
         self.setUpdatesEnabled(False)
         try:
-            self.current_page = page
-            self.selected_block_idx = -1
-
-            # Clear existing card widgets
-            for card in self.cards:
-                if isinstance(card, QWidget):
-                    self.container_layout.removeWidget(card)
-                    card.deleteLater()
-            self.cards.clear()
-
-            if not page or not page.blocks:
-                lbl_empty = QLabel("No dialogue text blocks on this page.")
-                lbl_empty.setObjectName("EmptyLabel")
-                lbl_empty.setStyleSheet("color: #64748b; font-style: italic; padding: 16px;")
-                lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.cards.append(lbl_empty)
-                self.container_layout.insertWidget(0, lbl_empty)
+            self._sync_empty_label(len(blocks) == 0)
+            if not blocks:
                 return
 
-            for idx, block in enumerate(page.blocks):
-                card = BlockRowCard(block_idx=idx, block=block)
+            new_count = len(blocks)
+            old_count = len(self.cards)
+
+            # Reuse existing cards (update in-place)
+            for i in range(min(old_count, new_count)):
+                self.cards[i].replace_block(i, blocks[i])
+
+            # Add new cards for extra blocks
+            for i in range(old_count, new_count):
+                card = BlockRowCard(block_idx=i, block=blocks[i])
                 card.selected.connect(self._on_card_selected)
                 card.text_modified.connect(self.text_modified.emit)
                 card.translate_requested.connect(self._on_single_block_translate)
                 self.cards.append(card)
-                self.container_layout.insertWidget(idx, card)
+                # Insert before the trailing stretch (last item)
+                self.container_layout.insertWidget(i, card)
+
+            # Remove excess cards when new page has fewer blocks
+            while len(self.cards) > new_count:
+                card = self.cards.pop()
+                self.container_layout.removeWidget(card)
+                card.deleteLater()
         finally:
             self.setUpdatesEnabled(True)
 
-    def select_block(self, idx: int) -> None:
-        """Highlight specified block index and scroll into view."""
-        self.selected_block_idx = idx
-        selected_card = None
-        for card in self.cards:
-            if isinstance(card, BlockRowCard):
-                is_sel = (card.block_idx == idx)
-                card.set_selected(is_sel)
-                if is_sel:
-                    selected_card = card
+    def _sync_empty_label(self, show: bool) -> None:
+        """Show or hide the 'no blocks' placeholder label."""
+        if show:
+            if self._empty_label is None:
+                self._empty_label = QLabel("No dialogue text blocks on this page.")
+                self._empty_label.setStyleSheet("color: #64748b; font-style: italic; padding: 16px;")
+                self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.container_layout.insertWidget(0, self._empty_label)
+            self._empty_label.show()
+            for card in self.cards:
+                card.hide()
+        else:
+            if self._empty_label is not None:
+                self._empty_label.hide()
+            for card in self.cards:
+                card.show()
 
-        if selected_card:
-            self.scroll_area.ensureWidgetVisible(selected_card)
+    # ── Block selection ───────────────────────────────────────────────────────
+
+    def select_block(self, idx: int) -> None:
+        """Highlight specified block and scroll it into view."""
+        self.selected_block_idx = idx
+        target_card: Optional[BlockRowCard] = None
+        for card in self.cards:
+            is_sel = card.block_idx == idx
+            card.set_selected(is_sel)
+            if is_sel:
+                target_card = card
+        if target_card:
+            self.scroll_area.ensureWidgetVisible(target_card)
 
     def _on_card_selected(self, idx: int) -> None:
         self.select_block(idx)
         self.block_selected.emit(idx)
 
+    # ── Filter ────────────────────────────────────────────────────────────────
+
+    def _apply_filter(self, query: str) -> None:
+        """Show/hide cards based on the search query."""
+        for card in self.cards:
+            card.setVisible(card.matches_filter(query) if query else True)
+
+    # ── Translation actions ───────────────────────────────────────────────────
+
     def _on_translate_page(self) -> None:
-        engine = self.combo_engine.currentText()
-        src = self.combo_src.currentText()
-        tgt = self.combo_tgt.currentText()
-        self.translate_page_requested.emit(engine, src, tgt)
+        self.translate_page_requested.emit(
+            self.combo_engine.currentText(),
+            self.combo_src.currentText(),
+            self.combo_tgt.currentText(),
+        )
 
     def _on_translate_selected(self) -> None:
         if self.selected_block_idx >= 0:
             self._on_single_block_translate(self.selected_block_idx)
 
     def _on_single_block_translate(self, idx: int) -> None:
-        engine = self.combo_engine.currentText()
-        src = self.combo_src.currentText()
-        tgt = self.combo_tgt.currentText()
-        self.translate_block_requested.emit(idx, engine, src, tgt)
+        self.translate_block_requested.emit(
+            idx,
+            self.combo_engine.currentText(),
+            self.combo_src.currentText(),
+            self.combo_tgt.currentText(),
+        )

@@ -22,7 +22,7 @@ from qtpy.QtWidgets import (
     QApplication,
 )
 from qtpy.QtCore import Qt, Signal, QTimer
-from qtpy.QtGui import QKeySequence, QKeyEvent
+from qtpy.QtGui import QKeySequence, QKeyEvent, QFont
 
 from READER.core.loader import MangaProjectData, load_manga_project
 from READER.core.favorites import FAVORITES
@@ -185,9 +185,18 @@ class ReaderView(QWidget):
         self.page_loading_bar.hide()
         layout.addWidget(self.page_loading_bar)
 
-        # Ctrl+S Shortcut for saving
+        # Ctrl+S — save; Ctrl+T — translate current page
         self.sc_save = QShortcut(QKeySequence("Ctrl+S"), self)
         self.sc_save.activated.connect(self.save_project)
+
+        self.sc_translate = QShortcut(QKeySequence("Ctrl+T"), self)
+        self.sc_translate.activated.connect(self.translate_current_page)
+
+        # Debounce timer for verification-status saves (avoids save-on-every-scroll)
+        self._status_save_timer = QTimer(self)
+        self._status_save_timer.setSingleShot(True)
+        self._status_save_timer.setInterval(500)
+        self._status_save_timer.timeout.connect(self._do_save_status)
 
         # ── Page Number Sidebar (left strip) + main content ──────────────────
         # Outer horizontal layout holds [page sidebar | main splitter]
@@ -299,7 +308,12 @@ class ReaderView(QWidget):
         new_status = self.combo_status.currentData()
         if new_status:
             self.project_data.verification_status = new_status
-            self.save_project()
+            # Debounce: only save 500 ms after the user stops changing
+            self._status_save_timer.start()
+
+    def _do_save_status(self) -> None:
+        """Persisted save called by debounce timer after status change settles."""
+        self.save_project()
 
     def _on_text_modified(self, block_idx: int) -> None:
         """Handle inline text edits from side panel."""
@@ -368,6 +382,11 @@ class ReaderView(QWidget):
     ) -> None:
         if not self.project_data:
             return
+
+        # Cancel any in-flight worker before starting a new one
+        if self.worker and self.worker.isRunning():
+            self.worker.request_cancel()
+            self.worker.wait()
 
         pages = page_names or [p.page_name for p in self.project_data.pages]
 
