@@ -3,13 +3,13 @@ import os.path as osp
 import sys
 import subprocess
 import logging
+from typing import Union
 
 from qtpy.QtWidgets import (
     QMainWindow,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QStackedWidget,
     QFrame,
     QLabel,
     QPushButton,
@@ -22,24 +22,23 @@ from qtpy.QtGui import QIcon, QKeySequence, QKeyEvent
 
 from READER.core.scanner import MangaItem
 from READER.ui.library_view import LibraryView
-from READER.ui.reader_view import ReaderView
 from READER.ui.styles import DARK_THEME_QSS
 
 LOGGER = logging.getLogger('READER.main_window')
 
 
 class ReaderMainWindow(QMainWindow):
-    """Main Application Window for Manga Reader."""
+    """Main Application Window for Manga Library & Translator Launcher."""
 
     def __init__(self, translated_dir: str, open_manga_path: str = '', parent=None):
         super().__init__(parent)
         self.translated_dir = osp.abspath(translated_dir)
 
-        self.setWindowTitle("BalloonsTranslator - Manga Reader")
+        self.setWindowTitle("BalloonsTranslator - Manga Library")
         self.resize(1280, 850)
         self.setStyleSheet(DARK_THEME_QSS)
 
-        # Central Widget & Stack
+        # Central Widget
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -58,7 +57,7 @@ class ReaderMainWindow(QMainWindow):
         self.btn_nav_library.clicked.connect(self.show_library)
         head_layout.addWidget(self.btn_nav_library)
 
-        app_title = QLabel("Balloons Manga Reader")
+        app_title = QLabel("Balloons Manga Library")
         app_title.setObjectName("HeaderTitle")
         head_layout.addWidget(app_title, stretch=1)
 
@@ -72,21 +71,11 @@ class ReaderMainWindow(QMainWindow):
 
         layout.addWidget(self.header)
 
-        # Stacked Views (Library vs Reader)
-        self.stack = QStackedWidget()
-        layout.addWidget(self.stack, stretch=1)
-
-        # 0: Library View
+        # Library View
         self.library_view = LibraryView(self.translated_dir)
         self.library_view.manga_selected.connect(self.open_manga_item)
         self.library_view.open_translator.connect(self.launch_translator_for_manga)
-        self.stack.addWidget(self.library_view)
-
-        # 1: Reader View
-        self.reader_view = ReaderView()
-        self.reader_view.back_to_library.connect(self._back_from_reader)
-        self.reader_view.open_in_translator.connect(self.launch_translator_for_manga)
-        self.stack.addWidget(self.reader_view)
+        layout.addWidget(self.library_view, stretch=1)
 
         # Shortcuts
         self.sc_fullscreen = QShortcut(QKeySequence("F11"), self)
@@ -97,29 +86,15 @@ class ReaderMainWindow(QMainWindow):
 
         # Handle initial manga path if passed
         if open_manga_path and osp.exists(open_manga_path):
-            self.open_manga_by_path(open_manga_path)
+            self.launch_translator_for_manga(open_manga_path)
 
     def show_library(self) -> None:
         """Go to the top-level author grid (nav-bar Library button)."""
         self.library_view.scan_library()
-        self.stack.setCurrentIndex(0)
-        self.header.show()
-
-    def _back_from_reader(self) -> None:
-        """Return from reader back to the author's manga grid (no rescan)."""
-        self.stack.setCurrentIndex(0)
-        self.header.show()
-        self.library_view.return_to_author()
 
     def open_manga_item(self, item: MangaItem) -> None:
-        self.reader_view.load_manga(item.path, json_path=item.json_path)
-        self.header.hide()  # Maximise reading area
-        self.stack.setCurrentIndex(1)
-
-    def open_manga_by_path(self, manga_path: str) -> None:
-        self.reader_view.load_manga(manga_path)
-        self.header.hide()
-        self.stack.setCurrentIndex(1)
+        """Open picked manga directly in BalloonsTranslator."""
+        self.launch_translator_for_manga(item.path)
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -132,9 +107,7 @@ class ReaderMainWindow(QMainWindow):
     def _on_esc_pressed(self) -> None:
         if self.isFullScreen():
             self.showNormal()
-            self.btn_fullscreen.setText("\u26f6 Fullscreen")
-        elif self.stack.currentIndex() == 1:
-            self._back_from_reader()
+            self.btn_fullscreen.setText("⛶ Fullscreen")
 
     def _select_custom_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(

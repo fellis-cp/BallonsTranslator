@@ -79,10 +79,6 @@ def main() -> int:
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
-    # Initialize BalloonsTranslator font engine and family aliases
-    from READER.core.font_init import init_font_engine
-    init_font_engine(str(WORKSPACE_DIR))
-
     from READER.ui.main_window import ReaderMainWindow
 
 

@@ -365,15 +365,14 @@ class MangaCardWidget(QFrame):
 
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
-        action_read = menu.addAction("Read Manga")
+        action_trans = menu.addAction("Open in BalloonsTranslator")
         action_fav = menu.addAction(
             "Unfavorite" if FAVORITES.is_favorite(self.item.relative_path) else "Favorite ⭐"
         )
         action_folder = menu.addAction("Open Folder")
-        action_trans = menu.addAction("Open in BalloonsTranslator")
 
         selected = menu.exec_(pos)
-        if selected == action_read:
+        if selected == action_trans:
             self.card_clicked.emit(self.item)
         elif selected == action_fav:
             self._on_toggle_favorite()
@@ -384,8 +383,7 @@ class MangaCardWidget(QFrame):
                 subprocess.Popen(['open', self.item.path])
             else:
                 subprocess.Popen(['xdg-open', self.item.path])
-        elif selected == action_trans:
-            self.open_translator_requested.emit(self.item)
+
 
 
 # ── Library view ──────────────────────────────────────────────────────────────

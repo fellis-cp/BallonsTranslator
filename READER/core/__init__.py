@@ -1,3 +1,3 @@
 """
-Core module for Manga Reader (directory scanner, manga project loader).
+Core module for Manga Library (directory scanner, favorites).
 """
