@@ -5,7 +5,12 @@ import tempfile
 import json
 import shutil
 
-from READER.core.scanner import scan_translated_directory, is_image_file, find_manga_in_dir
+from READER.core.scanner import (
+    scan_translated_directory,
+    is_image_file,
+    find_manga_in_dir,
+    save_manga_verification_status,
+)
 
 
 class TestReaderCore(unittest.TestCase):
@@ -74,6 +79,30 @@ class TestReaderCore(unittest.TestCase):
         manga = items[0]
         self.assertEqual(manga.author, "Shigeatsu")
         self.assertEqual(manga.title, "Life Support 2 - Chapter 1")
+
+    def test_save_verification_status(self):
+        manga_dir = osp.join(self.tmp_dir, "Author B", "Manga 2")
+        os.makedirs(manga_dir)
+        with open(osp.join(manga_dir, "001.jpg"), "w") as f:
+            f.write("mock_img")
+
+        json_path = osp.join(manga_dir, "imgtrans_Manga 2.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump({"pages": {}}, f)
+
+        items = scan_translated_directory(self.tmp_dir)
+        manga = [it for it in items if it.title == "Manga 2"][0]
+        self.assertEqual(manga.verification_status, "unverified")
+
+        # Set to verified
+        success = save_manga_verification_status(manga, "verified")
+        self.assertTrue(success)
+        self.assertEqual(manga.verification_status, "verified")
+
+        # Verify persisted
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data.get("verification_status"), "verified")
 
 
 if __name__ == '__main__':

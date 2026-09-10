@@ -218,3 +218,40 @@ def scan_translated_directory(root_dir: str) -> List[MangaItem]:
     # Sort by mtime descending (most recently modified first)
     items.sort(key=lambda x: x.mtime, reverse=True)
     return items
+
+
+def save_manga_verification_status(item: MangaItem, status: str) -> bool:
+    """Persist verification status ('verified', 'needs_fix', 'unverified') for a manga volume.
+
+    >>> manga = MangaItem('Test', '/tmp', 'Test', 1, False)
+    >>> manga.verification_status
+    'unverified'
+    """
+    item.verification_status = status
+    if item.json_path and osp.exists(item.json_path):
+        try:
+            with open(item.json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                data['verification_status'] = status
+                with open(item.json_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                return True
+        except Exception:
+            pass
+
+    # Save to metadata.json in the manga directory
+    meta_path = osp.join(item.path, 'metadata.json')
+    try:
+        meta = {}
+        if osp.exists(meta_path):
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    meta = loaded
+        meta['verification_status'] = status
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False

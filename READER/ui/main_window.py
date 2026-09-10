@@ -3,7 +3,7 @@ import os.path as osp
 import sys
 import subprocess
 import logging
-from typing import Union
+from typing import Optional, Union
 
 from qtpy.QtWidgets import (
     QMainWindow,
@@ -17,11 +17,12 @@ from qtpy.QtWidgets import (
     QShortcut,
     QApplication,
 )
-from qtpy.QtCore import Qt, QSize
+from qtpy.QtCore import Qt, QSize, QTimer
 from qtpy.QtGui import QIcon, QKeySequence, QKeyEvent
 
 from READER.core.scanner import MangaItem
 from READER.ui.library_view import LibraryView
+from READER.ui.loading_overlay import LoadingOverlay
 from READER.ui.styles import DARK_THEME_QSS
 
 LOGGER = logging.getLogger('READER.main_window')
@@ -33,6 +34,7 @@ class ReaderMainWindow(QMainWindow):
     def __init__(self, translated_dir: str, open_manga_path: str = '', parent=None):
         super().__init__(parent)
         self.translated_dir = osp.abspath(translated_dir)
+        self._launch_timer: Optional[QTimer] = None
 
         self.setWindowTitle("BalloonsTranslator - Manga Library")
         self.resize(1280, 850)
@@ -76,6 +78,9 @@ class ReaderMainWindow(QMainWindow):
         self.library_view.manga_selected.connect(self.open_manga_item)
         self.library_view.open_translator.connect(self.launch_translator_for_manga)
         layout.addWidget(self.library_view, stretch=1)
+
+        # Global Loading Overlay
+        self.loading_overlay = LoadingOverlay(self)
 
         # Shortcuts
         self.sc_fullscreen = QShortcut(QKeySequence("F11"), self)
@@ -125,9 +130,33 @@ class ReaderMainWindow(QMainWindow):
         parent_root = osp.abspath(osp.join(osp.dirname(__file__), '..', '..'))
         launch_script = osp.join(parent_root, 'ballontranslator', 'launch.py')
 
-        if osp.exists(launch_script):
+        if not osp.exists(launch_script):
+            LOGGER.warning(f"Could not locate launch script at {launch_script}")
+            return
+
+        manga_name = osp.basename(manga_dir.rstrip('/\\')) or "Manga"
+        self.loading_overlay.start_loading(
+            title="Opening BalloonsTranslator",
+            subtitle=f"Launching workspace for '{manga_name}'...",
+        )
+        QApplication.processEvents()
+
+        try:
             cmd = [sys.executable, launch_script, '--proj-dir', manga_dir]
             LOGGER.info(f"Launching translator command: {cmd}")
             subprocess.Popen(cmd, cwd=parent_root)
-        else:
-            LOGGER.warning(f"Could not locate launch script at {launch_script}")
+        except Exception as e:
+            LOGGER.error(f"Failed to launch translator: {e}", exc_info=True)
+            self.loading_overlay.stop_loading()
+            return
+
+        if self._launch_timer is not None:
+            self._launch_timer.stop()
+
+        self._launch_timer = QTimer(self)
+        self._launch_timer.setSingleShot(True)
+        self._launch_timer.timeout.connect(self._on_launch_completed)
+        self._launch_timer.start(2200)
+
+    def _on_launch_completed(self) -> None:
+        self.loading_overlay.stop_loading()

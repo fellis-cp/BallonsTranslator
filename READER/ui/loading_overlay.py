@@ -10,7 +10,7 @@ from qtpy.QtWidgets import (
     QGraphicsDropShadowEffect,
     QFrame,
 )
-from qtpy.QtCore import Qt, QTimer, QRectF
+from qtpy.QtCore import Qt, QTimer, QRectF, QEvent
 from qtpy.QtGui import QPainter, QColor, QPen, QBrush, QFont, QConicalGradient
 
 LOGGER = logging.getLogger('READER.loading_overlay')
@@ -90,6 +90,12 @@ class LoadingOverlay(QWidget):
             }
             """
         )
+
+        shadow = QGraphicsDropShadowEffect(self.card)
+        shadow.setBlurRadius(24)
+        shadow.setColor(QColor(0, 0, 0, 160))
+        shadow.setOffset(0, 6)
+        self.card.setGraphicsEffect(shadow)
 
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(24, 24, 24, 24)
@@ -177,6 +183,8 @@ class LoadingOverlay(QWidget):
         self.hide()
 
     def eventFilter(self, watched, event) -> bool:
-        if watched == self.parentWidget() and event.type() == event.Type.Resize:
+        if watched is not self.parentWidget():
+            return super().eventFilter(watched, event)
+        if event.type() == QEvent.Resize:
             self.resize(watched.size())
         return super().eventFilter(watched, event)

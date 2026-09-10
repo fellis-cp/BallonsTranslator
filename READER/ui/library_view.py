@@ -23,7 +23,7 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt, Signal, QThread, QTimer, QObject
 from qtpy.QtGui import QPixmap, QCursor
 
-from READER.core.scanner import MangaItem, scan_translated_directory
+from READER.core.scanner import MangaItem, scan_translated_directory, save_manga_verification_status
 from READER.core.favorites import FAVORITES
 from READER.ui.loading_overlay import LoadingOverlay
 
@@ -254,6 +254,7 @@ class MangaCardWidget(QFrame):
     card_clicked = Signal(MangaItem)
     open_translator_requested = Signal(MangaItem)
     favorite_toggled = Signal()
+    status_changed = Signal(MangaItem, str)
 
     _THUMB_W = 168
     _THUMB_H = 175
@@ -307,18 +308,14 @@ class MangaCardWidget(QFrame):
         pages_badge.setObjectName("Badge")
         meta_layout.addWidget(pages_badge)
 
-        status_badge = QLabel()
-        status_badge.setObjectName("Badge")
-        if item.verification_status == "verified":
-            status_badge.setText("✓ Verified")
-            status_badge.setStyleSheet("background-color: #065f46; color: #6ee7b7;")
-        elif item.verification_status == "needs_fix":
-            status_badge.setText("⚠ Needs Fix")
-            status_badge.setStyleSheet("background-color: #991b1b; color: #fca5a5;")
-        else:
-            status_badge.setText("Unverified")
-            status_badge.setStyleSheet("background-color: #374151; color: #d1d5db;")
-        meta_layout.addWidget(status_badge)
+        self.btn_status = QPushButton()
+        self.btn_status.setObjectName("StatusBadgeButton")
+        self.btn_status.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_status.setToolTip("Click to set verification status")
+        self._update_status_badge()
+        self.btn_status.clicked.connect(self._on_status_button_clicked)
+        meta_layout.addWidget(self.btn_status)
+
         meta_layout.addStretch()
         layout.addLayout(meta_layout)
 
@@ -333,6 +330,44 @@ class MangaCardWidget(QFrame):
         FAVORITES.toggle_favorite(self.item.relative_path)
         self._update_star_icon()
         self.favorite_toggled.emit()
+
+    def set_status(self, status: str) -> None:
+        save_manga_verification_status(self.item, status)
+        self._update_status_badge()
+        self.status_changed.emit(self.item, status)
+
+    def _update_status_badge(self) -> None:
+        base_style = "border: none; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold;"
+        if self.item.verification_status == "verified":
+            self.btn_status.setText("✓ Verified")
+            self.btn_status.setStyleSheet(f"{base_style} background-color: #065f46; color: #6ee7b7;")
+        elif self.item.verification_status == "needs_fix":
+            self.btn_status.setText("⚠ Needs Fix")
+            self.btn_status.setStyleSheet(f"{base_style} background-color: #991b1b; color: #fca5a5;")
+        else:
+            self.btn_status.setText("○ Unverified")
+            self.btn_status.setStyleSheet(f"{base_style} background-color: #374151; color: #d1d5db;")
+
+    def _on_status_button_clicked(self) -> None:
+        menu = QMenu(self)
+        a_ver = menu.addAction("✓ Verified")
+        a_fix = menu.addAction("⚠ Needs Fix")
+        a_unv = menu.addAction("○ Unverified")
+        if self.item.verification_status == "verified":
+            a_ver.setText("✓ Verified  (Current)")
+        elif self.item.verification_status == "needs_fix":
+            a_fix.setText("⚠ Needs Fix  (Current)")
+        else:
+            a_unv.setText("○ Unverified  (Current)")
+
+        pos = self.btn_status.mapToGlobal(self.btn_status.rect().bottomLeft())
+        selected = menu.exec_(pos)
+        if selected == a_ver:
+            self.set_status("verified")
+        elif selected == a_fix:
+            self.set_status("needs_fix")
+        elif selected == a_unv:
+            self.set_status("unverified")
 
     def matches(self, filter_text: str, category: str) -> bool:
         if category == "⭐ Favorites Only" and not FAVORITES.is_favorite(self.item.relative_path):
@@ -366,6 +401,19 @@ class MangaCardWidget(QFrame):
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
         action_trans = menu.addAction("Open in BalloonsTranslator")
+
+        status_menu = menu.addMenu("Set Status 🏷️")
+        a_ver = status_menu.addAction("✓ Verified")
+        a_fix = status_menu.addAction("⚠ Needs Fix")
+        a_unv = status_menu.addAction("○ Unverified")
+
+        if self.item.verification_status == "verified":
+            a_ver.setText("✓ Verified  (Current)")
+        elif self.item.verification_status == "needs_fix":
+            a_fix.setText("⚠ Needs Fix  (Current)")
+        else:
+            a_unv.setText("○ Unverified  (Current)")
+
         action_fav = menu.addAction(
             "Unfavorite" if FAVORITES.is_favorite(self.item.relative_path) else "Favorite ⭐"
         )
@@ -374,6 +422,12 @@ class MangaCardWidget(QFrame):
         selected = menu.exec_(pos)
         if selected == action_trans:
             self.card_clicked.emit(self.item)
+        elif selected == a_ver:
+            self.set_status("verified")
+        elif selected == a_fix:
+            self.set_status("needs_fix")
+        elif selected == a_unv:
+            self.set_status("unverified")
         elif selected == action_fav:
             self._on_toggle_favorite()
         elif selected == action_folder:
@@ -383,6 +437,7 @@ class MangaCardWidget(QFrame):
                 subprocess.Popen(['open', self.item.path])
             else:
                 subprocess.Popen(['xdg-open', self.item.path])
+
 
 
 
@@ -610,6 +665,7 @@ class LibraryView(QWidget):
                     lambda it: self.open_translator.emit(it.path)
                 )
                 card.favorite_toggled.connect(self._relayout)
+                card.status_changed.connect(self._on_item_status_changed)
                 self._all_manga_cards.append(card)
                 if item.cover_image_path:
                     self._cover_to_cards.setdefault(item.cover_image_path, []).append(card)
@@ -930,6 +986,11 @@ class LibraryView(QWidget):
             self.grid_layout.addWidget(widget, i // cols, i % cols)
 
     # ── Status bar helpers ────────────────────────────────────────────────────
+
+    def _on_item_status_changed(self, item: MangaItem, status: str) -> None:
+        self._update_status_bar(self.items)
+        if self.category_combo.currentIndex() != 0:
+            self._relayout()
 
     def _update_status_bar(self, items: List[MangaItem]) -> None:
         verified = sum(1 for it in items if it.verification_status == "verified")
