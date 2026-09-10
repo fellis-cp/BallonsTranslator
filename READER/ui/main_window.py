@@ -84,7 +84,8 @@ class ReaderMainWindow(QMainWindow):
 
         # 1: Reader View
         self.reader_view = ReaderView()
-        self.reader_view.back_to_library.connect(self.show_library)
+        self.reader_view.back_to_library.connect(self._back_from_reader)
+        self.reader_view.open_in_translator.connect(self.launch_translator_for_manga)
         self.stack.addWidget(self.reader_view)
 
         # Shortcuts
@@ -99,9 +100,16 @@ class ReaderMainWindow(QMainWindow):
             self.open_manga_by_path(open_manga_path)
 
     def show_library(self) -> None:
+        """Go to the top-level author grid (nav-bar Library button)."""
         self.library_view.scan_library()
         self.stack.setCurrentIndex(0)
         self.header.show()
+
+    def _back_from_reader(self) -> None:
+        """Return from reader back to the author's manga grid (no rescan)."""
+        self.stack.setCurrentIndex(0)
+        self.header.show()
+        self.library_view.return_to_author()
 
     def open_manga_item(self, item: MangaItem) -> None:
         self.reader_view.load_manga(item.path, json_path=item.json_path)
@@ -124,9 +132,9 @@ class ReaderMainWindow(QMainWindow):
     def _on_esc_pressed(self) -> None:
         if self.isFullScreen():
             self.showNormal()
-            self.btn_fullscreen.setText("⛶ Fullscreen")
+            self.btn_fullscreen.setText("\u26f6 Fullscreen")
         elif self.stack.currentIndex() == 1:
-            self.show_library()
+            self._back_from_reader()
 
     def _select_custom_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(

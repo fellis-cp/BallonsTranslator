@@ -2,7 +2,7 @@ import os
 import os.path as osp
 import subprocess
 import sys
-from typing import List, Optional, Set
+from typing import List, Optional, Dict
 
 from qtpy.QtWidgets import (
     QWidget,
@@ -16,23 +16,147 @@ from qtpy.QtWidgets import (
     QPushButton,
     QComboBox,
     QMenu,
-    QAction,
     QApplication,
+    QSizePolicy,
 )
-from qtpy.QtCore import Qt, Signal, QSize
-from qtpy.QtGui import QPixmap, QImage, QCursor, QFont
+from qtpy.QtCore import Qt, Signal, QThread, QTimer, QObject
+from qtpy.QtGui import QPixmap, QCursor
 
 from READER.core.scanner import MangaItem, scan_translated_directory
 from READER.core.favorites import FAVORITES
 from READER.ui.loading_overlay import LoadingOverlay
 
 
+# ── Background thumbnail loader ───────────────────────────────────────────────
+
+class _ThumbnailSignals(QObject):
+    ready = Signal(str, QPixmap)   # (cover_image_path, scaled_pixmap)
+    finished = Signal()
+
+
+class ThumbnailLoaderThread(QThread):
+    """Decode and scale cover images off the main thread.
+
+    >>> t = ThumbnailLoaderThread([])
+    >>> t.isRunning()
+    False
+    """
+
+    def __init__(self, jobs: List[tuple], parent=None):
+        super().__init__(parent)
+        self._jobs = jobs          # [(path, w, h), ...]
+        self.signals = _ThumbnailSignals()
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        for path, w, h in self._jobs:
+            if self._cancelled:
+                break
+            if not path or not osp.exists(path):
+                continue
+            try:
+                pixmap = QPixmap(path)
+                if pixmap.isNull():
+                    continue
+                scaled = pixmap.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                cropped = scaled.copy(
+                    (scaled.width() - w) // 2,
+                    (scaled.height() - h) // 2,
+                    w, h,
+                )
+                self.signals.ready.emit(path, cropped)
+            except Exception:
+                pass
+        self.signals.finished.emit()
+
+
+# ── Author card ───────────────────────────────────────────────────────────────
+
+class AuthorCardWidget(QFrame):
+    """Card representing one author in the author-browse level."""
+
+    author_clicked = Signal(str)   # emits author name
+
+    _THUMB_W = 168
+    _THUMB_H = 175
+
+    def __init__(self, author: str, manga_items: List[MangaItem], parent=None):
+        super().__init__(parent)
+        self.author = author
+        self.cover_path: Optional[str] = None
+
+        # Use cover image from the author's first manga that has one
+        for item in manga_items:
+            if item.cover_image_path and osp.exists(item.cover_image_path):
+                self.cover_path = item.cover_image_path
+                break
+
+        self.setObjectName("MangaCard")
+        self.setFixedSize(184, 285)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+
+        self.thumb_label = QLabel()
+        self.thumb_label.setFixedSize(self._THUMB_W, self._THUMB_H)
+        self.thumb_label.setStyleSheet(
+            "border-radius: 6px; background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            "stop:0 #1e293b, stop:1 #0f172a);"
+        )
+        self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb_label.setText("👤")
+        self.thumb_label.setStyleSheet(
+            self.thumb_label.styleSheet() + " font-size: 40px;"
+        )
+        layout.addWidget(self.thumb_label)
+
+        # Author name
+        self.name_label = QLabel(author)
+        self.name_label.setObjectName("CardTitle")
+        self.name_label.setWordWrap(True)
+        self.name_label.setMaximumHeight(38)
+        self.name_label.setToolTip(author)
+        layout.addWidget(self.name_label)
+
+        # Manga count badge
+        n = len(manga_items)
+        badge = QLabel(f"📚 {n} manga" if n != 1 else "📚 1 manga")
+        badge.setObjectName("Badge")
+        badge.setStyleSheet("background-color: #1e3a5f; color: #7dd3fc; padding: 2px 6px; border-radius: 8px;")
+        layout.addWidget(badge)
+
+        layout.addStretch()
+
+    def set_thumbnail(self, pixmap: QPixmap) -> None:
+        self.thumb_label.setPixmap(pixmap)
+        self.thumb_label.setText("")
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.author_clicked.emit(self.author)
+        super().mousePressEvent(event)
+
+
+# ── Manga card ────────────────────────────────────────────────────────────────
+
 class MangaCardWidget(QFrame):
-    """Grid card widget representing a single manga volume/chapter."""
+    """Grid card for a single manga volume."""
 
     card_clicked = Signal(MangaItem)
     open_translator_requested = Signal(MangaItem)
     favorite_toggled = Signal()
+
+    _THUMB_W = 168
+    _THUMB_H = 175
 
     def __init__(self, item: MangaItem, parent=None):
         super().__init__(parent)
@@ -45,30 +169,23 @@ class MangaCardWidget(QFrame):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
 
-        # Top Bar inside Card (Favorite Star & Thumbnail)
-        thumb_container = QFrame()
-        thumb_container.setFixedSize(168, 175)
-        thumb_layout = QVBoxLayout(thumb_container)
-        thumb_layout.setContentsMargins(0, 0, 0, 0)
-
         self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(168, 175)
+        self.thumb_label.setFixedSize(self._THUMB_W, self._THUMB_H)
         self.thumb_label.setStyleSheet("border-radius: 6px; background-color: #12141c;")
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb_label.setText(item.title[:12])
 
-        # Star Button overlay
         self.btn_star = QPushButton(self.thumb_label)
         self.btn_star.setFixedSize(28, 28)
         self.btn_star.move(134, 6)
         self.btn_star.setStyleSheet(
-            "background-color: rgba(30, 34, 48, 0.85); border: none; border-radius: 14px; font-size: 14px;"
+            "background-color: rgba(30,34,48,0.85); border:none; border-radius:14px; font-size:14px;"
         )
         self._update_star_icon()
         self.btn_star.clicked.connect(self._on_toggle_favorite)
 
         layout.addWidget(self.thumb_label)
 
-        # Title Label
         self.title_label = QLabel(item.title)
         self.title_label.setObjectName("CardTitle")
         self.title_label.setWordWrap(True)
@@ -76,13 +193,11 @@ class MangaCardWidget(QFrame):
         self.title_label.setToolTip(item.title)
         layout.addWidget(self.title_label)
 
-        # Author Label
         self.author_label = QLabel(f"👤 {item.author}")
         self.author_label.setObjectName("CardMeta")
         self.author_label.setMaximumHeight(16)
         layout.addWidget(self.author_label)
 
-        # Meta & Badges Layout
         meta_layout = QHBoxLayout()
         meta_layout.setContentsMargins(0, 2, 0, 0)
         meta_layout.setSpacing(4)
@@ -91,7 +206,6 @@ class MangaCardWidget(QFrame):
         pages_badge.setObjectName("Badge")
         meta_layout.addWidget(pages_badge)
 
-        # Verification Status Badge
         status_badge = QLabel()
         status_badge.setObjectName("Badge")
         if item.verification_status == "verified":
@@ -104,53 +218,56 @@ class MangaCardWidget(QFrame):
             status_badge.setText("Unverified")
             status_badge.setStyleSheet("background-color: #374151; color: #d1d5db;")
         meta_layout.addWidget(status_badge)
-
         meta_layout.addStretch()
         layout.addLayout(meta_layout)
 
-        self._load_thumbnail()
+    def set_thumbnail(self, pixmap: QPixmap) -> None:
+        self.thumb_label.setPixmap(pixmap)
+        self.thumb_label.setText("")
 
     def _update_star_icon(self) -> None:
-        is_fav = FAVORITES.is_favorite(self.item.relative_path)
-        self.btn_star.setText("⭐" if is_fav else "☆")
+        self.btn_star.setText("⭐" if FAVORITES.is_favorite(self.item.relative_path) else "☆")
 
     def _on_toggle_favorite(self) -> None:
         FAVORITES.toggle_favorite(self.item.relative_path)
         self._update_star_icon()
         self.favorite_toggled.emit()
 
-    def _load_thumbnail(self) -> None:
-        if self.item.cover_image_path and osp.exists(self.item.cover_image_path):
-            pixmap = QPixmap(self.item.cover_image_path)
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(
-                    168,
-                    175,
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                cropped = scaled.copy(
-                    (scaled.width() - 168) // 2,
-                    (scaled.height() - 175) // 2,
-                    168,
-                    175,
-                )
-                self.thumb_label.setPixmap(cropped)
-                return
+    def matches(self, filter_text: str, category: str) -> bool:
+        if category == "⭐ Favorites Only" and not FAVORITES.is_favorite(self.item.relative_path):
+            return False
+        if category == "✓ Verified Only" and self.item.verification_status != "verified":
+            return False
+        if category == "⚠ Needs Fix / Retranslate" and self.item.verification_status != "needs_fix":
+            return False
+        if category == "Unverified Only" and self.item.verification_status != "unverified":
+            return False
+        if filter_text:
+            q = filter_text.lower()
+            if not (
+                q in self.item.title.lower()
+                or q in self.item.author.lower()
+                or q in self.item.relative_path.lower()
+                or any(q in t.lower() for t in self.item.tags)
+                or any(q in a.lower() for a in self.item.artists)
+            ):
+                return False
+        return True
 
-        self.thumb_label.setText(self.item.title[:12])
-
-    def mousePressEvent(self, event):
+    def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.card_clicked.emit(self.item)
         elif event.button() == Qt.MouseButton.RightButton:
-            self._show_context_menu(event.globalPos() if hasattr(event, 'globalPos') else QCursor.pos())
+            pos = event.globalPos() if hasattr(event, 'globalPos') else QCursor.pos()
+            self._show_context_menu(pos)
         super().mousePressEvent(event)
 
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
         action_read = menu.addAction("Read Manga")
-        action_fav = menu.addAction("Unfavorite" if FAVORITES.is_favorite(self.item.relative_path) else "Favorite ⭐")
+        action_fav = menu.addAction(
+            "Unfavorite" if FAVORITES.is_favorite(self.item.relative_path) else "Favorite ⭐"
+        )
         action_folder = menu.addAction("Open Folder")
         action_trans = menu.addAction("Open in BalloonsTranslator")
 
@@ -170,34 +287,106 @@ class MangaCardWidget(QFrame):
             self.open_translator_requested.emit(self.item)
 
 
+# ── Library view ──────────────────────────────────────────────────────────────
+
 class LibraryView(QWidget):
-    """Main Manga Library browsing panel."""
+    """Two-level manga library: Author grid → Manga grid.
+
+    Navigation
+    ----------
+    * First screen shows one `AuthorCardWidget` per author.
+    * Clicking an author drills into a manga grid filtered to that author.
+    * A breadcrumb bar with "← Authors" returns to the author level.
+    * All filter/sort/search controls work at both levels.
+
+    Performance
+    -----------
+    * Cards (both author and manga) are created once per scan.
+    * Filter changes only call `setVisible()` + reposition — no widget recreation.
+    * Cover images are decoded off-thread by `ThumbnailLoaderThread`.
+    * Resize and search events are debounced.
+    """
 
     manga_selected = Signal(MangaItem)
     open_translator = Signal(str)
+
+    _VIEW_AUTHORS = "authors"
+    _VIEW_MANGA = "manga"
 
     def __init__(self, root_dir: str, parent=None):
         super().__init__(parent)
         self.root_dir = osp.abspath(root_dir)
         self.items: List[MangaItem] = []
-        self.cards: List[MangaCardWidget] = []
 
+        self._all_manga_cards: List[MangaCardWidget] = []
+        self._author_cards: List[AuthorCardWidget] = []
+        # cover_path → list of card objects (both types) waiting for the thumbnail
+        self._cover_to_cards: Dict[str, list] = {}
+
+        self._view_mode: str = self._VIEW_AUTHORS
+        self._active_author: str = ""          # lowercase key
+        self._active_author_display: str = ""  # original-casing label
+
+        self._thumb_loader: Optional[ThumbnailLoaderThread] = None
+
+        # Debounce timers
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(150)
+        self._resize_timer.timeout.connect(self._relayout)
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(self._relayout)
+
+        # ── UI ───────────────────────────────────────────────────────────────
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        # Toolbar & Filter Row 1 (Search & Actions)
+        # Breadcrumb / back bar (hidden in author mode, shown when drilling into an author)
+        self.breadcrumb_bar = QFrame()
+        self.breadcrumb_bar.setObjectName("ReaderControlBar")
+        bc_layout = QHBoxLayout(self.breadcrumb_bar)
+        bc_layout.setContentsMargins(8, 6, 8, 6)
+        bc_layout.setSpacing(12)
+
+        self.btn_back_authors = QPushButton("← Back to Authors")
+        self.btn_back_authors.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #1e3a5f;"
+            "  color: #7dd3fc;"
+            "  border: 1px solid #38bdf8;"
+            "  border-radius: 6px;"
+            "  padding: 4px 14px;"
+            "  font-size: 13px;"
+            "  font-weight: bold;"
+            "}"
+            "QPushButton:hover { background-color: #164e83; }"
+        )
+        self.btn_back_authors.clicked.connect(self._show_author_view)
+        bc_layout.addWidget(self.btn_back_authors)
+
+        self.breadcrumb_label = QLabel("")
+        self.breadcrumb_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 14px;")
+        bc_layout.addWidget(self.breadcrumb_label, stretch=1)
+
+        self.breadcrumb_bar.hide()
+        layout.addWidget(self.breadcrumb_bar)
+
+        # Toolbar row 1
         toolbar1 = QHBoxLayout()
         toolbar1.setSpacing(10)
 
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("🔍 Search manga title, author, or tags...")
-        self.search_edit.textChanged.connect(self._filter_cards)
+        self.search_edit.setPlaceholderText("🔍 Search title, author, or tags...")
+        self.search_edit.textChanged.connect(lambda: self._search_timer.start())
         toolbar1.addWidget(self.search_edit, stretch=2)
 
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["Recently Added", "Title A-Z", "Page Count"])
-        self.sort_combo.currentIndexChanged.connect(self._sort_and_refresh)
+        self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         toolbar1.addWidget(self.sort_combo, stretch=1)
 
         self.refresh_btn = QPushButton("🔄 Refresh")
@@ -206,14 +395,11 @@ class LibraryView(QWidget):
 
         layout.addLayout(toolbar1)
 
-        # Toolbar Row 2 (Author Filter & Category Filter)
-        toolbar2 = QHBoxLayout()
-        toolbar2.setSpacing(10)
-
-        self.author_combo = QComboBox()
-        self.author_combo.addItem("All Authors")
-        self.author_combo.currentIndexChanged.connect(self._filter_cards)
-        toolbar2.addWidget(self.author_combo, stretch=1)
+        # Toolbar row 2 (only meaningful in manga mode)
+        self.toolbar2 = QFrame()
+        t2_layout = QHBoxLayout(self.toolbar2)
+        t2_layout.setContentsMargins(0, 0, 0, 0)
+        t2_layout.setSpacing(10)
 
         self.category_combo = QComboBox()
         self.category_combo.addItems([
@@ -223,20 +409,72 @@ class LibraryView(QWidget):
             "⚠ Needs Fix / Retranslate",
             "Unverified Only",
         ])
-        self.category_combo.currentIndexChanged.connect(self._filter_cards)
-        toolbar2.addWidget(self.category_combo, stretch=1)
+        self.category_combo.currentIndexChanged.connect(self._relayout)
+        t2_layout.addWidget(self.category_combo, stretch=1)
 
-        layout.addLayout(toolbar2)
+        layout.addWidget(self.toolbar2)
+        # Hidden at startup — only shown after drilling into an author
+        self.toolbar2.hide()
 
-        # Status & Location Bar
-        self.status_label = QLabel(f"Library Location: {self.root_dir}")
+        self.status_label = QLabel(f"Library: {self.root_dir}")
         self.status_label.setObjectName("HeaderSubtitle")
         layout.addWidget(self.status_label)
 
-        # Scrollable Grid Area
+        # ── Status summary bar ───────────────────────────────────────────────
+        self.status_bar = QFrame()
+        sb_layout = QHBoxLayout(self.status_bar)
+        sb_layout.setContentsMargins(0, 2, 0, 2)
+        sb_layout.setSpacing(8)
+
+        _pill_base = (
+            "QPushButton {"
+            "  border-radius: 10px;"
+            "  padding: 3px 12px;"
+            "  font-size: 12px;"
+            "  font-weight: bold;"
+            "  border: none;"
+            "}"
+        )
+        self.pill_verified = QPushButton("✓ Verified  0")
+        self.pill_verified.setStyleSheet(
+            _pill_base
+            + "QPushButton { background: #065f46; color: #6ee7b7; }"
+            + "QPushButton:hover { background: #047857; }"
+            + "QPushButton:checked { border: 2px solid #34d399; }"
+        )
+        self.pill_verified.setCheckable(True)
+        self.pill_verified.clicked.connect(lambda: self._on_pill_clicked("verified"))
+        sb_layout.addWidget(self.pill_verified)
+
+        self.pill_needs_fix = QPushButton("\u26a0 Needs Fix  0")
+        self.pill_needs_fix.setStyleSheet(
+            _pill_base
+            + "QPushButton { background: #7f1d1d; color: #fca5a5; }"
+            + "QPushButton:hover { background: #991b1b; }"
+            + "QPushButton:checked { border: 2px solid #f87171; }"
+        )
+        self.pill_needs_fix.setCheckable(True)
+        self.pill_needs_fix.clicked.connect(lambda: self._on_pill_clicked("needs_fix"))
+        sb_layout.addWidget(self.pill_needs_fix)
+
+        self.pill_unverified = QPushButton("\u25cb Unverified  0")
+        self.pill_unverified.setStyleSheet(
+            _pill_base
+            + "QPushButton { background: #374151; color: #d1d5db; }"
+            + "QPushButton:hover { background: #4b5563; }"
+            + "QPushButton:checked { border: 2px solid #9ca3af; }"
+        )
+        self.pill_unverified.setCheckable(True)
+        self.pill_unverified.clicked.connect(lambda: self._on_pill_clicked("unverified"))
+        sb_layout.addWidget(self.pill_unverified)
+
+        sb_layout.addStretch()
+        layout.addWidget(self.status_bar)
+
+        # Grid scroll area
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        
+
         self.grid_container = QWidget()
         self.grid_layout = QGridLayout(self.grid_container)
         self.grid_layout.setContentsMargins(8, 8, 8, 8)
@@ -246,107 +484,303 @@ class LibraryView(QWidget):
         self.scroll_area.setWidget(self.grid_container)
         layout.addWidget(self.scroll_area)
 
-        # Loading Overlay
         self.loading_overlay = LoadingOverlay(self)
 
-        # Initial scan
         self.scan_library()
 
+    # ── Scan (creates all cards once) ─────────────────────────────────────────
+
     def scan_library(self) -> None:
-        """Scan TRANSLATED directory and populate cards."""
-        self.loading_overlay.start_loading("Scanning Manga Library", "Discovering translated manga volumes...")
+        self._cancel_thumb_loader()
+        self.loading_overlay.start_loading("Scanning Library", "Discovering manga volumes...")
         QApplication.processEvents()
 
         try:
             self.items = scan_translated_directory(self.root_dir)
-            
-            # Populate Author dropdown dynamically
-            authors = sorted(list({item.author for item in self.items if item.author and item.author != "Unknown"}))
-            self.author_combo.blockSignals(True)
-            self.author_combo.clear()
-            self.author_combo.addItem("All Authors")
-            for auth in authors:
-                self.author_combo.addItem(f"👤 {auth}")
-            self.author_combo.blockSignals(False)
+            self._destroy_all_cards()
+            self._cover_to_cards.clear()
 
-            self._sort_and_refresh()
+            # Build manga cards
+            for item in self.items:
+                card = MangaCardWidget(item)
+                card.card_clicked.connect(self.manga_selected.emit)
+                card.open_translator_requested.connect(
+                    lambda it: self.open_translator.emit(it.path)
+                )
+                card.favorite_toggled.connect(self._relayout)
+                self._all_manga_cards.append(card)
+                if item.cover_image_path:
+                    self._cover_to_cards.setdefault(item.cover_image_path, []).append(card)
+
+            # Group by author case-insensitively so e.g. 'GADEN' and 'Gaden' merge into one card.
+            # Display name = the most-frequent casing variant across items; ties broken alphabetically.
+            author_groups_ci: Dict[str, List[MangaItem]] = {}   # key = lowercase
+            author_variants: Dict[str, Dict[str, int]] = {}      # lowercase -> {variant: count}
+            for item in self.items:
+                key = item.author.lower()
+                author_groups_ci.setdefault(key, []).append(item)
+                author_variants.setdefault(key, {})
+                author_variants[key][item.author] = author_variants[key].get(item.author, 0) + 1
+
+            for key, manga_list in sorted(author_groups_ci.items()):
+                display_name = max(
+                    author_variants[key],
+                    key=lambda v: (author_variants[key][v], v),
+                )
+                ac = AuthorCardWidget(display_name, manga_list)
+                ac.author_clicked.connect(self._show_manga_for_author)
+                self._author_cards.append(ac)
+                if ac.cover_path:
+                    self._cover_to_cards.setdefault(ac.cover_path, []).append(ac)
+
+            # Reset to author view
+            self._view_mode = self._VIEW_AUTHORS
+            self._active_author = ""
+            self._active_author_display = ""
+            self._apply_sort()
+            self._relayout()
+            self._start_thumb_loader()
+
         finally:
             self.loading_overlay.stop_loading()
 
     def set_root_dir(self, root_dir: str) -> None:
         self.root_dir = osp.abspath(root_dir)
-        self.status_label.setText(f"Library Location: {self.root_dir}")
+        self.status_label.setText(f"Library: {self.root_dir}")
         self.scan_library()
 
-    def _sort_and_refresh(self) -> None:
+    # ── Navigation ────────────────────────────────────────────────────────────
+
+    def _show_manga_for_author(self, author: str) -> None:
+        """Drill into the manga grid for a specific author."""
+        self._view_mode = self._VIEW_MANGA
+        self._active_author = author.lower()
+        self._active_author_display = author
+        self.breadcrumb_bar.show()
+        self.breadcrumb_label.setText(f"👤 {author}")
+        self.toolbar2.show()
+        self._relayout()
+        # Scroll to top when entering manga view
+        self.scroll_area.verticalScrollBar().setValue(0)
+
+    def return_to_author(self) -> None:
+        """Restore the manga grid for the last selected author without rescanning.
+
+        Called when the user presses back in the reader.  Falls back to the
+        top-level author grid when no author drill-down had occurred.
+        """
+        if self._active_author:
+            self._view_mode = self._VIEW_MANGA
+            self.breadcrumb_bar.show()
+            self.breadcrumb_label.setText(f"👤 {self._active_author_display}")
+            self.toolbar2.show()
+            self._relayout()
+            self.scroll_area.verticalScrollBar().setValue(0)
+        else:
+            self._show_author_view()
+
+    def _show_author_view(self) -> None:
+        """Return to the top-level author grid."""
+        self._view_mode = self._VIEW_AUTHORS
+        self._active_author = ""
+        self._active_author_display = ""
+        self.breadcrumb_bar.hide()
+        self.toolbar2.hide()
+        self.search_edit.clear()
+        self._relayout()
+        self.scroll_area.verticalScrollBar().setValue(0)
+
+    # ── Sort ──────────────────────────────────────────────────────────────────
+
+    def _on_sort_changed(self) -> None:
+        self._apply_sort()
+        self._relayout()
+
+    def _apply_sort(self) -> None:
         sort_mode = self.sort_combo.currentText()
+        # Sort manga cards
         if sort_mode == "Title A-Z":
-            self.items.sort(key=lambda x: x.title.lower())
+            self._all_manga_cards.sort(key=lambda c: c.item.title.lower())
         elif sort_mode == "Page Count":
-            self.items.sort(key=lambda x: x.page_count, reverse=True)
-        else: # Recently Added
-            self.items.sort(key=lambda x: x.mtime, reverse=True)
+            self._all_manga_cards.sort(key=lambda c: c.item.page_count, reverse=True)
+        else:
+            self._all_manga_cards.sort(key=lambda c: c.item.mtime, reverse=True)
+        # Sort author cards by name
+        self._author_cards.sort(key=lambda c: c.author.lower())
 
-        self._rebuild_grid()
+    # ── Layout (show/hide only — no widget creation) ──────────────────────────
 
-    def _rebuild_grid(self) -> None:
-        # Clear existing widgets
-        for card in self.cards:
-            card.deleteLater()
-        self.cards.clear()
+    def _relayout(self) -> None:
+        cols = max(1, (self.scroll_area.viewport().width() - 24) // 200)
+
+        # Remove all items from grid without deleting widgets
+        while self.grid_layout.count():
+            self.grid_layout.takeAt(0)
+
+        if self._view_mode == self._VIEW_AUTHORS:
+            self._relayout_authors(cols)
+        else:
+            self._relayout_manga(cols)
+
+    def _relayout_authors(self, cols: int) -> None:
+        # Hide all manga cards — they belong to the drill-down level, not here
+        for card in self._all_manga_cards:
+            card.setVisible(False)
 
         filter_text = self.search_edit.text().strip().lower()
-        selected_author = self.author_combo.currentText().replace("👤 ", "")
-        selected_category = self.category_combo.currentText()
+        visible: List[AuthorCardWidget] = []
+        for ac in self._author_cards:
+            show = (not filter_text) or (filter_text in ac.author.lower())
+            ac.setVisible(show)
+            if show:
+                visible.append(ac)
 
-        visible_count = 0
-        cols = max(1, (self.width() - 40) // 200)
+        for i, ac in enumerate(visible):
+            self.grid_layout.addWidget(ac, i // cols, i % cols)
 
-        for item in self.items:
-            # 1. Author Filter
-            if selected_author != "All Authors" and item.author != selected_author:
-                continue
+        self.status_label.setText(
+            f"Showing {len(visible)} author(s) — {len(self.items)} total manga volumes"
+        )
+        # Count across ALL items for the global status bar
+        self._update_status_bar(self.items)
 
-            # 2. Category / Verification Filter
-            if selected_category == "⭐ Favorites Only":
-                if not FAVORITES.is_favorite(item.relative_path):
-                    continue
-            elif selected_category == "✓ Verified Only":
-                if item.verification_status != "verified":
-                    continue
-            elif selected_category == "⚠ Needs Fix / Retranslate":
-                if item.verification_status != "needs_fix":
-                    continue
-            elif selected_category == "Unverified Only":
-                if item.verification_status != "unverified":
-                    continue
+    def _relayout_manga(self, cols: int) -> None:
+        # Hide all author cards — they belong to the top level, not here
+        for ac in self._author_cards:
+            ac.setVisible(False)
 
-            # 3. Search Text Filter
-            if filter_text:
-                match_title = filter_text in item.title.lower()
-                match_author = filter_text in item.author.lower()
-                match_rel = filter_text in item.relative_path.lower()
-                match_tag = any(filter_text in t.lower() for t in item.tags)
-                match_art = any(filter_text in a.lower() for a in item.artists)
-                if not (match_title or match_author or match_rel or match_tag or match_art):
-                    continue
+        filter_text = self.search_edit.text().strip()
+        category = self.category_combo.currentText()
+        visible: List[MangaCardWidget] = []
 
-            card = MangaCardWidget(item)
-            card.card_clicked.connect(self.manga_selected.emit)
-            card.open_translator_requested.connect(lambda item: self.open_translator.emit(item.path))
-            card.favorite_toggled.connect(self._rebuild_grid)
+        for card in self._all_manga_cards:
+            # Empty _active_author means flat/all-authors view (e.g. from a pill filter);
+            # non-empty restricts to the selected author.
+            belongs = (
+                not self._active_author
+                or card.item.author.lower() == self._active_author
+            )
+            passes = belongs and card.matches(filter_text, category)
+            card.setVisible(passes)
+            if passes:
+                visible.append(card)
 
-            row = visible_count // cols
-            col = visible_count % cols
-            self.grid_layout.addWidget(card, row, col)
-            self.cards.append(card)
-            visible_count += 1
+        for i, card in enumerate(visible):
+            self.grid_layout.addWidget(card, i // cols, i % cols)
 
-        self.status_label.setText(f"Displaying {visible_count} of {len(self.items)} manga volume(s)")
+        if self._active_author:
+            self.status_label.setText(
+                f"Showing {len(visible)} manga by \U0001f464 {self._active_author_display}"
+            )
+            scope_items = [
+                c.item for c in self._all_manga_cards
+                if c.item.author.lower() == self._active_author
+            ]
+        else:
+            self.status_label.setText(
+                f"Showing {len(visible)} of {len(self.items)} manga volumes"
+            )
+            scope_items = self.items
+        self._update_status_bar(scope_items)
 
-    def _filter_cards(self) -> None:
-        self._rebuild_grid()
+    # ── Status bar helpers ────────────────────────────────────────────────────
+
+    def _update_status_bar(self, items: List[MangaItem]) -> None:
+        """Recount verification status and update pill labels."""
+        verified = sum(1 for it in items if it.verification_status == "verified")
+        needs_fix = sum(1 for it in items if it.verification_status == "needs_fix")
+        unverified = sum(1 for it in items if it.verification_status == "unverified")
+        self.pill_verified.setText(f"\u2713 Verified  {verified}")
+        self.pill_needs_fix.setText(f"\u26a0 Needs Fix  {needs_fix}")
+        self.pill_unverified.setText(f"\u25cb Unverified  {unverified}")
+
+    def _on_pill_clicked(self, status: str) -> None:
+        """Toggle the category filter when a status pill is pressed.
+
+        In author view the pills switch to a flat manga view filtered by status.
+        Clicking an active pill clears the filter and returns to author view.
+        """
+        mapping = {
+            "verified": "\u2713 Verified Only",
+            "needs_fix": "\u26a0 Needs Fix / Retranslate",
+            "unverified": "Unverified Only",
+        }
+        pills = {
+            "verified": self.pill_verified,
+            "needs_fix": self.pill_needs_fix,
+            "unverified": self.pill_unverified,
+        }
+        target_text = mapping[status]
+        current_text = self.category_combo.currentText()
+
+        if current_text == target_text and self._view_mode == self._VIEW_MANGA:
+            # Already active — clear filter and return to author view
+            self.category_combo.blockSignals(True)
+            self.category_combo.setCurrentText("All Manga")
+            self.category_combo.blockSignals(False)
+            for p in pills.values():
+                p.setChecked(False)
+            if self._active_author:
+                # Was drilled into an author — stay there but remove status filter
+                self._relayout()
+            else:
+                # Was a flat filtered view — go back to author grid
+                self._show_author_view()
+        else:
+            # Set the filter
+            self.category_combo.blockSignals(True)
+            self.category_combo.setCurrentText(target_text)
+            self.category_combo.blockSignals(False)
+            for key, p in pills.items():
+                p.setChecked(key == status)
+            # In author view: switch to flat manga view (no author restriction)
+            if self._view_mode == self._VIEW_AUTHORS:
+                self._view_mode = self._VIEW_MANGA
+                # _active_author stays empty = show all authors
+                self.breadcrumb_bar.show()
+                self.breadcrumb_label.setText("All Manga")
+                self.toolbar2.show()
+            self._relayout()
+
+    # ── Async thumbnail loading ────────────────────────────────────────────────
+
+    def _start_thumb_loader(self) -> None:
+        jobs = [
+            (path, MangaCardWidget._THUMB_W, MangaCardWidget._THUMB_H)
+            for path in self._cover_to_cards
+            if path and osp.exists(path)
+        ]
+        if not jobs:
+            return
+        self._thumb_loader = ThumbnailLoaderThread(jobs, parent=self)
+        self._thumb_loader.signals.ready.connect(self._on_thumbnail_ready)
+        self._thumb_loader.start()
+
+    def _on_thumbnail_ready(self, path: str, pixmap: QPixmap) -> None:
+        for card in self._cover_to_cards.get(path, []):
+            card.set_thumbnail(pixmap)
+
+    def _cancel_thumb_loader(self) -> None:
+        if self._thumb_loader and self._thumb_loader.isRunning():
+            self._thumb_loader.cancel()
+            self._thumb_loader.wait()
+        self._thumb_loader = None
+
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+
+    def _destroy_all_cards(self) -> None:
+        self._cancel_thumb_loader()
+        while self.grid_layout.count():
+            self.grid_layout.takeAt(0)
+        for card in self._all_manga_cards:
+            card.deleteLater()
+        self._all_manga_cards.clear()
+        for ac in self._author_cards:
+            ac.deleteLater()
+        self._author_cards.clear()
+
+    # ── Resize debounce ───────────────────────────────────────────────────────
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._rebuild_grid()
+        self._resize_timer.start()

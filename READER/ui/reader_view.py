@@ -38,6 +38,7 @@ class ReaderView(QWidget):
     """Full-featured manga page viewer panel with toolbar controls, side-by-side text editor, verification status, and translation task runner."""
 
     back_to_library = Signal()
+    open_in_translator = Signal(str)  # emits manga_dir path
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -87,8 +88,8 @@ class ReaderView(QWidget):
         self.btn_trans_page.clicked.connect(self.translate_current_page)
         top_layout.addWidget(self.btn_trans_page)
 
-        self.btn_trans_vol = QPushButton("⚡ Translate Volume")
-        self.btn_trans_vol.setToolTip("Run batch translation pipeline on full volume")
+        self.btn_trans_vol = QPushButton("🖥 Open in BallonsTranslator")
+        self.btn_trans_vol.setToolTip("Open current manga folder in the full BallonsTranslator application")
         self.btn_trans_vol.clicked.connect(self.translate_full_volume)
         top_layout.addWidget(self.btn_trans_vol)
 
@@ -342,10 +343,10 @@ class ReaderView(QWidget):
         self._start_translation_task(page_names=[page.page_name])
 
     def translate_full_volume(self) -> None:
+        """Open the current manga folder in the full BallonsTranslator application."""
         if not self.project_data:
             return
-        pages = [p.page_name for p in self.project_data.pages]
-        self._start_translation_task(page_names=pages)
+        self.open_in_translator.emit(self.project_data.manga_dir)
 
     def _on_panel_translate_page(self, engine: str, src: str, tgt: str) -> None:
         if not self.project_data:
