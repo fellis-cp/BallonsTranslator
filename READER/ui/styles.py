@@ -200,7 +200,7 @@ QFrame#MangaCard:hover {
 }
 
 QLabel#CardTitle {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
     color: #f1f5f9;
 }

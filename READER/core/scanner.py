@@ -110,36 +110,58 @@ def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
     # Metadata extraction & Author detection
     artists = []
     tags = []
-    title = folder_name
     rel_path = osp.relpath(dir_path, root_dir)
     rel_parts = rel_path.split(os.sep)
 
-    # Deriving author:
-    # 1. From metadata.json artists list if available
-    # 2. From directory structure (e.g. TRANSLATED/Hiryu Ran/Chapter 1 -> Author: "Hiryu Ran")
+    # Deriving author and title from directory structure:
+    # 1 part:  ['SingleVolume'] -> author: 'Unknown', title: 'SingleVolume'
+    # 2 parts: ['Author', 'MangaTitle'] -> author: 'Author', title: 'MangaTitle'
+    # 3+ parts:['Author', 'Series', 'Ch1'] -> author: 'Author', title: 'Series - Ch1'
+    #          ['Author', 'Series', 'Sub', 'Ch1'] -> author: 'Author', title: 'Series - Sub - Ch1'
     author = "Unknown"
     if len(rel_parts) > 1:
         author = rel_parts[0]
+        if len(rel_parts) > 2:
+            title = " - ".join(rel_parts[1:])
+        else:
+            title = rel_parts[1]
+    else:
+        title = folder_name
 
-    meta_path = osp.join(dir_path, 'metadata.json')
-    if osp.exists(meta_path):
-        try:
-            with open(meta_path, 'r', encoding='utf-8') as f:
-                meta = json.load(f)
-                if isinstance(meta, dict):
-                    if meta.get('title'):
-                        title = meta['title']
-                    if isinstance(meta.get('artists'), list) and meta['artists']:
-                        artists = [str(a) for a in meta['artists']]
-                        author = artists[0].title()
-                    if isinstance(meta.get('tags'), list):
-                        tags = [t.get('tag') if isinstance(t, dict) else str(t) for t in meta['tags']]
-                    if meta.get('verification_status'):
-                        verification_status = meta['verification_status']
-                    if meta.get('notes'):
-                        notes = meta['notes']
-        except Exception:
-            pass
+    # Check for metadata.json in current directory or parent directories up to root_dir
+    meta_paths_to_check = []
+    meta_paths_to_check.append(osp.join(dir_path, 'metadata.json'))
+    
+    # Check parent directories for series-level metadata.json
+    parent = osp.dirname(dir_path)
+    root_abs = osp.abspath(root_dir)
+    while parent and osp.abspath(parent) != root_abs and osp.abspath(parent).startswith(root_abs):
+        parent_meta = osp.join(parent, 'metadata.json')
+        if osp.exists(parent_meta) and parent_meta not in meta_paths_to_check:
+            meta_paths_to_check.append(parent_meta)
+        parent = osp.dirname(parent)
+
+    for meta_path in meta_paths_to_check:
+        if osp.exists(meta_path):
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                    if isinstance(meta, dict):
+                        # Use title from the leaf metadata.json if explicitly provided
+                        if meta_path == meta_paths_to_check[0] and meta.get('title'):
+                            title = meta['title']
+                        if not artists and isinstance(meta.get('artists'), list) and meta['artists']:
+                            artists = [str(a) for a in meta['artists']]
+                            if author == "Unknown":
+                                author = artists[0].title()
+                        if not tags and isinstance(meta.get('tags'), list):
+                            tags = [t.get('tag') if isinstance(t, dict) else str(t) for t in meta['tags']]
+                        if verification_status == "unverified" and meta.get('verification_status'):
+                            verification_status = meta['verification_status']
+                        if not notes and meta.get('notes'):
+                            notes = meta['notes']
+            except Exception:
+                pass
 
     cover_path = osp.join(dir_path, img_files[0])
     

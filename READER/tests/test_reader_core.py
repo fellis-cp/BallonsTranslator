@@ -58,9 +58,23 @@ class TestReaderCore(unittest.TestCase):
 
         manga = items[0]
         self.assertEqual(manga.title, "Manga 1")
+        self.assertEqual(manga.author, "Author A")
         self.assertEqual(manga.page_count, 2)
         self.assertTrue(manga.has_translation)
         self.assertEqual(manga.json_path, json_path)
+
+    def test_scanner_nested_series(self):
+        # Create nested structure: TRANSLATED/Shigeatsu/Life Support 2/Chapter 1/
+        chap1_dir = osp.join(self.tmp_dir, "Shigeatsu", "Life Support 2", "Chapter 1")
+        os.makedirs(chap1_dir)
+        with open(osp.join(chap1_dir, "001.jpg"), "w") as f:
+            f.write("mock_img")
+
+        items = scan_translated_directory(self.tmp_dir)
+        self.assertEqual(len(items), 1)
+        manga = items[0]
+        self.assertEqual(manga.author, "Shigeatsu")
+        self.assertEqual(manga.title, "Life Support 2 - Chapter 1")
 
     def test_loader(self):
         manga_dir = osp.join(self.tmp_dir, "TestVolume")
