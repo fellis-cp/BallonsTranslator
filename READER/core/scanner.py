@@ -89,6 +89,14 @@ def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
     if preferred_json in entries:
         json_path = osp.join(dir_path, preferred_json)
         has_translation = True
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    verification_status = data.get('verification_status', verification_status)
+                    notes = data.get('notes', notes)
+        except Exception:
+            pass
     else:
         # Search for any imgtrans_*.json or json file containing "pages"
         for jf in json_files:
@@ -156,7 +164,7 @@ def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
                                 author = artists[0].title()
                         if not tags and isinstance(meta.get('tags'), list):
                             tags = [t.get('tag') if isinstance(t, dict) else str(t) for t in meta['tags']]
-                        if verification_status == "unverified" and meta.get('verification_status'):
+                        if (meta_path == meta_paths_to_check[0] or verification_status == "unverified") and meta.get('verification_status'):
                             verification_status = meta['verification_status']
                         if not notes and meta.get('notes'):
                             notes = meta['notes']
@@ -228,6 +236,8 @@ def save_manga_verification_status(item: MangaItem, status: str) -> bool:
     'unverified'
     """
     item.verification_status = status
+    saved = False
+
     if item.json_path and osp.exists(item.json_path):
         try:
             with open(item.json_path, 'r', encoding='utf-8') as f:
@@ -236,7 +246,7 @@ def save_manga_verification_status(item: MangaItem, status: str) -> bool:
                 data['verification_status'] = status
                 with open(item.json_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
-                return True
+                saved = True
         except Exception:
             pass
 
@@ -252,6 +262,8 @@ def save_manga_verification_status(item: MangaItem, status: str) -> bool:
         meta['verification_status'] = status
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
-        return True
+        saved = True
     except Exception:
-        return False
+        pass
+
+    return saved

@@ -597,7 +597,7 @@ class GeminiBrowserWorker(threading.Thread):
                 browser = p.chromium.launch_persistent_context(
                     user_data_dir=self.profile_dir,
                     channel="chrome",
-                    headless=False,
+                    headless=True,
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
                 page = browser.pages[0]

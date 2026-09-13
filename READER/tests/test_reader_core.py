@@ -99,10 +99,28 @@ class TestReaderCore(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(manga.verification_status, "verified")
 
-        # Verify persisted
+        # Verify persisted in json
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         self.assertEqual(data.get("verification_status"), "verified")
+
+        # Verify persisted in metadata.json
+        meta_path = osp.join(manga_dir, "metadata.json")
+        self.assertTrue(osp.exists(meta_path))
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual(meta.get("verification_status"), "verified")
+
+        # Simulate reopening the app (rescanning directory)
+        items_reloaded = scan_translated_directory(self.tmp_dir)
+        manga_reloaded = [it for it in items_reloaded if it.title == "Manga 2"][0]
+        self.assertEqual(manga_reloaded.verification_status, "verified")
+
+        # Test changing to needs_fix and rescanning
+        save_manga_verification_status(manga_reloaded, "needs_fix")
+        items_reloaded2 = scan_translated_directory(self.tmp_dir)
+        manga_reloaded2 = [it for it in items_reloaded2 if it.title == "Manga 2"][0]
+        self.assertEqual(manga_reloaded2.verification_status, "needs_fix")
 
 
 if __name__ == '__main__':
