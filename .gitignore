@@ -25,6 +25,7 @@ PortableGit
 test_dir
 tmp
 logs
+TRANSLATED/
 ballontrans_pylibs_win
 localtmp*
 
