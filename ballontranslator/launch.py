@@ -7,6 +7,10 @@ import shutil
 import subprocess
 from platform import platform
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 git = os.environ.get('GIT', "git")
 QT_APIS = ['pyqt6', 'pyside6', 'pyqt5', 'pyside2']
