@@ -227,25 +227,63 @@ class ReaderMainWindow(QMainWindow):
             return
         target_language = target_language.strip()
 
-        font_size, accepted = QInputDialog.getDouble(
+        font_modes = [
+            "Use current manga font settings",
+            "Set one font size for all selected manga",
+        ]
+        font_mode, accepted = QInputDialog.getItem(
             self,
-            "Batch Translate Font Size",
-            "Font size:",
-            24.0,
-            1.0,
-            1000.0,
-            1,
+            "Batch Translate Font Mode",
+            "Font handling:",
+            font_modes,
+            0,
+            False,
         )
         if not accepted:
             return
 
-        self.launch_batch_translate(project_paths, target_language, font_size)
+        preserve_font_settings = font_mode == font_modes[0]
+        font_size = None
+        if not preserve_font_settings:
+            font_size, accepted = QInputDialog.getDouble(
+                self,
+                "Batch Translate Font Size",
+                "Font size:",
+                24.0,
+                1.0,
+                1000.0,
+                1,
+            )
+            if not accepted:
+                return
+
+        instance_options = [str(value) for value in range(1, min(3, len(project_paths)) + 1)]
+        instance_count_text, accepted = QInputDialog.getItem(
+            self,
+            "Batch Translate Instances",
+            "BalloonsTranslator instances:",
+            instance_options,
+            0,
+            False,
+        )
+        if not accepted:
+            return
+
+        self.launch_batch_translate(
+            project_paths,
+            target_language,
+            font_size,
+            int(instance_count_text),
+            preserve_font_settings=preserve_font_settings,
+        )
 
     def launch_batch_translate(
         self,
         project_paths: List[str],
         target_language: str,
-        font_size: float,
+        font_size: Optional[float],
+        instance_count: int = 1,
+        preserve_font_settings: bool = False,
     ) -> None:
         parent_root = osp.abspath(osp.join(osp.dirname(__file__), '..', '..'))
         launch_script = osp.join(parent_root, 'ballontranslator', 'launch.py')
@@ -254,25 +292,39 @@ class ReaderMainWindow(QMainWindow):
             LOGGER.warning(f"Could not locate launch script at {launch_script}")
             return
 
+        instance_count = max(1, min(3, int(instance_count), len(project_paths)))
+        path_groups = [
+            project_paths[index::instance_count]
+            for index in range(instance_count)
+        ]
+
         self.loading_overlay.start_loading(
             title="Batch Translating",
-            subtitle=f"Opening {len(project_paths)} selected manga...",
+            subtitle=(
+                f"Opening {len(project_paths)} selected manga "
+                f"in {instance_count} instance(s)..."
+            ),
         )
         QApplication.processEvents()
 
         try:
-            cmd = [
-                sys.executable,
-                launch_script,
-                '--exec-paths-json',
-                json.dumps(project_paths),
-                '--batch-translate-target',
-                target_language,
-                '--batch-font-size',
-                str(font_size),
-            ]
-            LOGGER.info(f"Launching batch translate command: {cmd}")
-            subprocess.Popen(cmd, cwd=parent_root)
+            for group in path_groups:
+                if not group:
+                    continue
+                cmd = [
+                    sys.executable,
+                    launch_script,
+                    '--exec-paths-json',
+                    json.dumps(group),
+                    '--batch-translate-target',
+                    target_language,
+                ]
+                if preserve_font_settings:
+                    cmd.append('--batch-preserve-font-settings')
+                elif font_size is not None:
+                    cmd.extend(['--batch-font-size', str(font_size)])
+                LOGGER.info(f"Launching batch translate command: {cmd}")
+                subprocess.Popen(cmd, cwd=parent_root)
         except Exception as e:
             LOGGER.error(f"Failed to launch batch translate: {e}", exc_info=True)
             self.loading_overlay.stop_loading()

@@ -96,26 +96,57 @@ class TestReaderUI(unittest.TestCase):
         self.assertEqual(window.language, "IND")
         mock_set_language.assert_called_once_with("IND")
 
-    def test_launch_batch_translate_uses_single_visible_process(self):
+    def test_launch_batch_translate_splits_across_visible_processes(self):
         window = ReaderMainWindow(translated_dir=self.tmp_dir)
         project_a = osp.join(self.tmp_dir, "A", "imgtrans_A.json")
         project_b = osp.join(self.tmp_dir, "B", "IND", "imgtrans_B.json")
+        project_c = osp.join(self.tmp_dir, "C", "imgtrans_C.json")
 
         with patch("subprocess.Popen") as mock_popen, \
              patch("os.path.exists", return_value=True):
             mock_popen.return_value = MagicMock()
-            window.launch_batch_translate([project_a, project_b], "Indonesia", 32.0)
+            window.launch_batch_translate(
+                [project_a, project_b, project_c],
+                "Indonesia",
+                32.0,
+                instance_count=2,
+            )
+
+        self.assertEqual(mock_popen.call_count, 2)
+        commands = [call.args[0] for call in mock_popen.call_args_list]
+        self.assertTrue(all("--headless" not in cmd for cmd in commands))
+        self.assertEqual(
+            json.loads(commands[0][commands[0].index("--exec-paths-json") + 1]),
+            [project_a, project_c],
+        )
+        self.assertEqual(
+            json.loads(commands[1][commands[1].index("--exec-paths-json") + 1]),
+            [project_b],
+        )
+        for cmd in commands:
+            self.assertIn("--batch-translate-target", cmd)
+            self.assertIn("--batch-font-size", cmd)
+            self.assertEqual(cmd[cmd.index("--batch-translate-target") + 1], "Indonesia")
+            self.assertEqual(cmd[cmd.index("--batch-font-size") + 1], "32.0")
+
+    def test_launch_batch_translate_can_preserve_current_font_settings(self):
+        window = ReaderMainWindow(translated_dir=self.tmp_dir)
+        project_a = osp.join(self.tmp_dir, "A", "imgtrans_A.json")
+
+        with patch("subprocess.Popen") as mock_popen, \
+             patch("os.path.exists", return_value=True):
+            mock_popen.return_value = MagicMock()
+            window.launch_batch_translate(
+                [project_a],
+                "Indonesia",
+                None,
+                preserve_font_settings=True,
+            )
 
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args.args[0]
-        self.assertNotIn("--headless", cmd)
-        self.assertIn("--exec-paths-json", cmd)
-        self.assertIn("--batch-translate-target", cmd)
-        self.assertIn("--batch-font-size", cmd)
-        paths_json = cmd[cmd.index("--exec-paths-json") + 1]
-        self.assertEqual(json.loads(paths_json), [project_a, project_b])
-        self.assertEqual(cmd[cmd.index("--batch-translate-target") + 1], "Indonesia")
-        self.assertEqual(cmd[cmd.index("--batch-font-size") + 1], "32.0")
+        self.assertIn("--batch-preserve-font-settings", cmd)
+        self.assertNotIn("--batch-font-size", cmd)
 
     def test_selection_count_updates_batch_button(self):
         window = ReaderMainWindow(translated_dir=self.tmp_dir)

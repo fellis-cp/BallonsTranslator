@@ -165,6 +165,7 @@ class MainWindow(mainwindow_cls):
         self._render_global_format = None
         self._batch_render_font_size: Optional[float] = None
         self._batch_font_size: Optional[float] = None
+        self._batch_preserve_font_settings = False
         self._batch_active = False
         self._llm_context_dirty = False
 
@@ -2526,6 +2527,9 @@ class MainWindow(mainwindow_cls):
             exec_dirs = exec_dirs.split(',')
         self._batch_render_font_size = kwargs.get('batch_render_font_size')
         self._batch_font_size = kwargs.get('batch_font_size')
+        self._batch_preserve_font_settings = bool(
+            kwargs.get('batch_preserve_font_settings', False)
+        )
         batch_translate_target = kwargs.get('batch_translate_target', '')
         if batch_translate_target:
             self.on_trans_tgt_changed(str(batch_translate_target))
@@ -2578,6 +2582,8 @@ class MainWindow(mainwindow_cls):
         if self._batch_render_font_size is not None:
             self.on_run_imgtrans(render_only=True)
         else:
+            if self._batch_preserve_font_settings:
+                self._run_imgtrans_wo_textstyle_update = True
             self.on_run_imgtrans()
 
     def on_create_errdialog(self, error_msg: str, detail_traceback: str = '', exception_type: str = ''):

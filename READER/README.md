@@ -26,8 +26,8 @@ The library automatically scans the `TRANSLATED/` directory, discovers all trans
 
 4. **Batch Translate Selected Manga**:
    - Tick manga cards with their checkboxes, then click **Batch Selected**.
-   - The reader asks for a target language and font size.
-   - The reader launches one normal **BalloonsTranslator** window and processes the selected projects sequentially.
+   - The reader asks for a target language, whether to use each manga's current font settings or one shared font size, and 1/2/3 **BalloonsTranslator** instances.
+   - Each normal **BalloonsTranslator** window processes its assigned projects sequentially.
    - The selected reader language is respected, so Indonesian batches use `IND/imgtrans_*.json`.
 
 ---

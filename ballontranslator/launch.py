@@ -92,6 +92,7 @@ parser.add_argument("--exec_dirs", default='', help='translation queue (project 
 parser.add_argument("--exec-paths-json", default='', help='translation queue as a JSON list of project directories or JSON files')
 parser.add_argument("--batch-render-font-size", default=None, type=float, help='render each queued project with this font size without changing other text settings')
 parser.add_argument("--batch-font-size", default=None, type=float, help='translate each queued project and render with this font size')
+parser.add_argument("--batch-preserve-font-settings", action='store_true', help='preserve each queued project font settings during batch translation')
 parser.add_argument("--batch-translate-target", default='', help='target language to use for a queued batch run')
 parser.add_argument("--exit-on-batch-finish", action='store_true', help='exit after the headless batch queue finishes')
 parser.add_argument("--ldpi", default=None, type=float, help='logical dots perinch')
