@@ -15,6 +15,7 @@ from qtpy.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QCheckBox,
     QComboBox,
     QMenu,
     QApplication,
@@ -23,7 +24,13 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt, Signal, QThread, QTimer, QObject
 from qtpy.QtGui import QPixmap, QCursor
 
-from READER.core.scanner import MangaItem, scan_translated_directory, save_manga_verification_status
+from READER.core.scanner import (
+    DEFAULT_LANGUAGE,
+    MangaItem,
+    normalize_language,
+    scan_translated_directory,
+    save_manga_verification_status,
+)
 from READER.core.favorites import FAVORITES
 from READER.ui.loading_overlay import LoadingOverlay
 
@@ -253,6 +260,8 @@ class MangaCardWidget(QFrame):
 
     card_clicked = Signal(MangaItem)
     open_translator_requested = Signal(MangaItem)
+    batch_render_requested = Signal(MangaItem)
+    selection_toggled = Signal()
     favorite_toggled = Signal()
     status_changed = Signal(MangaItem, str)
 
@@ -262,6 +271,12 @@ class MangaCardWidget(QFrame):
     def __init__(self, item: MangaItem, parent=None):
         super().__init__(parent)
         self.item = item
+        self._press_started = False
+        self._long_press_fired = False
+        self._long_press_timer = QTimer(self)
+        self._long_press_timer.setSingleShot(True)
+        self._long_press_timer.setInterval(700)
+        self._long_press_timer.timeout.connect(self._on_long_press)
         self.setObjectName("MangaCard")
         self.setFixedSize(184, 295)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -275,6 +290,16 @@ class MangaCardWidget(QFrame):
         self.thumb_label.setStyleSheet("border-radius: 6px; background-color: #12141c;")
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setText(item.title[:12])
+
+        self.select_checkbox = QCheckBox(self.thumb_label)
+        self.select_checkbox.setFixedSize(28, 28)
+        self.select_checkbox.move(6, 6)
+        self.select_checkbox.setToolTip("Select for batch")
+        self.select_checkbox.setStyleSheet(
+            "QCheckBox { background-color: rgba(30,34,48,0.85); border-radius: 14px; }"
+            "QCheckBox::indicator { width: 18px; height: 18px; }"
+        )
+        self.select_checkbox.toggled.connect(lambda _checked: self.selection_toggled.emit())
 
         self.btn_star = QPushButton(self.thumb_label)
         self.btn_star.setFixedSize(28, 28)
@@ -330,6 +355,12 @@ class MangaCardWidget(QFrame):
         FAVORITES.toggle_favorite(self.item.relative_path)
         self._update_star_icon()
         self.favorite_toggled.emit()
+
+    def is_selected(self) -> bool:
+        return self.select_checkbox.isChecked()
+
+    def set_selected(self, selected: bool) -> None:
+        self.select_checkbox.setChecked(selected)
 
     def set_status(self, status: str) -> None:
         save_manga_verification_status(self.item, status)
@@ -390,17 +421,35 @@ class MangaCardWidget(QFrame):
                 return False
         return True
 
+    def _on_long_press(self) -> None:
+        if self._press_started:
+            self._long_press_fired = True
+            self.batch_render_requested.emit(self.item)
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.card_clicked.emit(self.item)
+            self._press_started = True
+            self._long_press_fired = False
+            self._long_press_timer.start()
         elif event.button() == Qt.MouseButton.RightButton:
             pos = event.globalPos() if hasattr(event, 'globalPos') else QCursor.pos()
             self._show_context_menu(pos)
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._long_press_timer.stop()
+            was_long_press = self._long_press_fired
+            self._press_started = False
+            self._long_press_fired = False
+            if not was_long_press:
+                self.card_clicked.emit(self.item)
+        super().mouseReleaseEvent(event)
+
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
         action_trans = menu.addAction("Open in BalloonsTranslator")
+        action_batch_render = menu.addAction("Batch Translate Selected")
 
         status_menu = menu.addMenu("Set Status 🏷️")
         a_ver = status_menu.addAction("✓ Verified")
@@ -422,6 +471,8 @@ class MangaCardWidget(QFrame):
         selected = menu.exec_(pos)
         if selected == action_trans:
             self.card_clicked.emit(self.item)
+        elif selected == action_batch_render:
+            self.batch_render_requested.emit(self.item)
         elif selected == a_ver:
             self.set_status("verified")
         elif selected == a_fix:
@@ -458,10 +509,13 @@ class LibraryView(QWidget):
 
     manga_selected = Signal(MangaItem)
     open_translator = Signal(str)
+    batch_render_requested = Signal(list)
+    selection_changed = Signal(int)
 
-    def __init__(self, root_dir: str, parent=None):
+    def __init__(self, root_dir: str, language: str = DEFAULT_LANGUAGE, parent=None):
         super().__init__(parent)
         self.root_dir = osp.abspath(root_dir)
+        self.language = normalize_language(language)
         self.items: List[MangaItem] = []
 
         self._all_manga_cards: List[MangaCardWidget] = []
@@ -652,7 +706,7 @@ class LibraryView(QWidget):
         QApplication.processEvents()
 
         try:
-            self.items = scan_translated_directory(self.root_dir)
+            self.items = scan_translated_directory(self.root_dir, language=self.language)
             self._destroy_all_cards()
             self._cover_to_cards.clear()
             self._scroll_pos_map.clear()
@@ -662,8 +716,10 @@ class LibraryView(QWidget):
                 card = MangaCardWidget(item)
                 card.card_clicked.connect(self.manga_selected.emit)
                 card.open_translator_requested.connect(
-                    lambda it: self.open_translator.emit(it.path)
+                    lambda it: self.open_translator.emit(it.json_path or it.path)
                 )
+                card.batch_render_requested.connect(self._on_batch_render_requested)
+                card.selection_toggled.connect(self._on_selection_toggled)
                 card.favorite_toggled.connect(self._relayout)
                 card.status_changed.connect(self._on_item_status_changed)
                 self._all_manga_cards.append(card)
@@ -729,6 +785,25 @@ class LibraryView(QWidget):
         self.root_dir = osp.abspath(root_dir)
         self.status_label.setText(f"Library: {self.root_dir}")
         self.scan_library()
+
+    def set_language(self, language: str) -> None:
+        self.language = normalize_language(language)
+        self.scan_library()
+
+    def _on_batch_render_requested(self, item: MangaItem) -> None:
+        batch_items = self.selected_items()
+        if item not in batch_items:
+            batch_items = [item]
+        self.batch_render_requested.emit(batch_items)
+
+    def selected_items(self) -> List[MangaItem]:
+        return [card.item for card in self._all_manga_cards if card.is_selected()]
+
+    def selected_count(self) -> int:
+        return len(self.selected_items())
+
+    def _on_selection_toggled(self) -> None:
+        self.selection_changed.emit(self.selected_count())
 
     # ── Hierarchical Navigation ───────────────────────────────────────────────
 

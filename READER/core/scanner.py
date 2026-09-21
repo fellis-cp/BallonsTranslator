@@ -1,11 +1,22 @@
 import os
 import os.path as osp
 import json
+import shutil
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 
 IMAGE_EXTENSIONS = {'.webp', '.jpg', '.jpeg', '.png', '.jxl', '.bmp'}
-IGNORE_DIRS = {'mask', 'inpainted', 'result', 'assets', '.btrans_cache', '.git'}
+LANGUAGE_CODES = ('ENG', 'IND')
+DEFAULT_LANGUAGE = 'ENG'
+IGNORE_DIRS = {
+    'mask',
+    'inpainted',
+    'result',
+    'assets',
+    '.btrans_cache',
+    '.git',
+    *LANGUAGE_CODES,
+}
 
 
 @dataclass
@@ -25,6 +36,7 @@ class MangaItem:
     has_translation: bool
     cover_image_path: Optional[str] = None
     json_path: Optional[str] = None
+    language: str = DEFAULT_LANGUAGE
     author: str = "Unknown"
     artists: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
@@ -41,6 +53,7 @@ class MangaItem:
             'has_translation': self.has_translation,
             'cover_image_path': self.cover_image_path,
             'json_path': self.json_path,
+            'language': self.language,
             'author': self.author,
             'artists': self.artists,
             'tags': self.tags,
@@ -62,7 +75,89 @@ def is_image_file(filename: str) -> bool:
     return ext in IMAGE_EXTENSIONS
 
 
-def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
+def normalize_language(language: str) -> str:
+    """Return a supported reader language code.
+
+    >>> normalize_language('ind')
+    'IND'
+    >>> normalize_language('unknown')
+    'ENG'
+    """
+    code = str(language or DEFAULT_LANGUAGE).upper()
+    return code if code in LANGUAGE_CODES else DEFAULT_LANGUAGE
+
+
+def _read_project_status(json_path: str) -> Tuple[str, str]:
+    verification_status = "unverified"
+    notes = ""
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                verification_status = data.get('verification_status', verification_status)
+                notes = data.get('notes', notes)
+    except Exception:
+        pass
+    return verification_status, notes
+
+
+def _find_project_json_in_dir(dir_path: str, entries: List[str]) -> Optional[str]:
+    folder_name = osp.basename(dir_path)
+    preferred_json = f"imgtrans_{folder_name}.json"
+    if preferred_json in entries:
+        return osp.join(dir_path, preferred_json)
+
+    for jf in [e for e in entries if e.endswith('.json') and e != 'metadata.json']:
+        jp = osp.join(dir_path, jf)
+        try:
+            with open(jp, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict) and 'pages' in data:
+                    return jp
+        except Exception:
+            continue
+    return None
+
+
+def _find_project_json_for_language(
+    dir_path: str,
+    entries: List[str],
+    language: str,
+) -> Optional[str]:
+    root_json_path = _find_project_json_in_dir(dir_path, entries)
+    lang_code = normalize_language(language)
+    lang_dir = osp.join(dir_path, lang_code)
+
+    if osp.isdir(lang_dir):
+        try:
+            lang_entries = os.listdir(lang_dir)
+        except OSError:
+            lang_entries = []
+        lang_json_path = _find_project_json_in_dir(lang_dir, lang_entries)
+        if lang_json_path:
+            return lang_json_path
+
+    if lang_code == DEFAULT_LANGUAGE:
+        return root_json_path
+
+    if root_json_path:
+        try:
+            os.makedirs(lang_dir, exist_ok=True)
+            lang_json_path = osp.join(lang_dir, osp.basename(root_json_path))
+            if not osp.exists(lang_json_path):
+                shutil.copy2(root_json_path, lang_json_path)
+            return lang_json_path
+        except OSError:
+            return root_json_path
+
+    return None
+
+
+def find_manga_in_dir(
+    dir_path: str,
+    root_dir: str,
+    language: str = DEFAULT_LANGUAGE,
+) -> Optional[MangaItem]:
     """Inspect a directory to see if it is a manga folder.
 
     A valid manga directory contains at least one image file.
@@ -76,44 +171,14 @@ def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
     if not img_files:
         return None
 
-    # Check for translation JSON
-    json_files = [e for e in entries if e.endswith('.json')]
-    json_path = None
-    has_translation = False
     verification_status = "unverified"
     notes = ""
 
-    # Prefer imgtrans_*.json matching folder name or any imgtrans_*.json
-    folder_name = osp.basename(dir_path)
-    preferred_json = f"imgtrans_{folder_name}.json"
-    if preferred_json in entries:
-        json_path = osp.join(dir_path, preferred_json)
-        has_translation = True
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    verification_status = data.get('verification_status', verification_status)
-                    notes = data.get('notes', notes)
-        except Exception:
-            pass
-    else:
-        # Search for any imgtrans_*.json or json file containing "pages"
-        for jf in json_files:
-            if jf == 'metadata.json':
-                continue
-            jp = osp.join(dir_path, jf)
-            try:
-                with open(jp, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, dict) and 'pages' in data:
-                        json_path = jp
-                        has_translation = True
-                        verification_status = data.get('verification_status', verification_status)
-                        notes = data.get('notes', notes)
-                        break
-            except Exception:
-                continue
+    lang_code = normalize_language(language)
+    json_path = _find_project_json_for_language(dir_path, entries, language)
+    has_translation = json_path is not None
+    if json_path:
+        verification_status, notes = _read_project_status(json_path)
 
     # Metadata extraction & Author detection
     artists = []
@@ -126,6 +191,7 @@ def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
     # 2 parts: ['Author', 'MangaTitle'] -> author: 'Author', title: 'MangaTitle'
     # 3+ parts:['Author', 'Series', 'Ch1'] -> author: 'Author', title: 'Series - Ch1'
     #          ['Author', 'Series', 'Sub', 'Ch1'] -> author: 'Author', title: 'Series - Sub - Ch1'
+    folder_name = osp.basename(dir_path)
     author = "Unknown"
     if len(rel_parts) > 1:
         author = rel_parts[0]
@@ -164,7 +230,11 @@ def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
                                 author = artists[0].title()
                         if not tags and isinstance(meta.get('tags'), list):
                             tags = [t.get('tag') if isinstance(t, dict) else str(t) for t in meta['tags']]
-                        if (meta_path == meta_paths_to_check[0] or verification_status == "unverified") and meta.get('verification_status'):
+                        if (
+                            lang_code == DEFAULT_LANGUAGE
+                            and (meta_path == meta_paths_to_check[0] or verification_status == "unverified")
+                            and meta.get('verification_status')
+                        ):
                             verification_status = meta['verification_status']
                         if not notes and meta.get('notes'):
                             notes = meta['notes']
@@ -186,6 +256,7 @@ def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
         has_translation=has_translation,
         cover_image_path=cover_path,
         json_path=json_path,
+        language=lang_code,
         author=author,
         artists=artists,
         tags=tags,
@@ -196,7 +267,10 @@ def find_manga_in_dir(dir_path: str, root_dir: str) -> Optional[MangaItem]:
 
 
 
-def scan_translated_directory(root_dir: str) -> List[MangaItem]:
+def scan_translated_directory(
+    root_dir: str,
+    language: str = DEFAULT_LANGUAGE,
+) -> List[MangaItem]:
     """Recursively scan root_dir for all translated manga directories.
 
     >>> import tempfile, os
@@ -218,7 +292,7 @@ def scan_translated_directory(root_dir: str) -> List[MangaItem]:
         # Filter out ignored directories
         dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith('.')]
 
-        item = find_manga_in_dir(current_root, root_dir)
+        item = find_manga_in_dir(current_root, root_dir, language=language)
         if item and item.path not in visited_dirs:
             visited_dirs.add(item.path)
             items.append(item)
@@ -250,20 +324,21 @@ def save_manga_verification_status(item: MangaItem, status: str) -> bool:
         except Exception:
             pass
 
-    # Save to metadata.json in the manga directory
-    meta_path = osp.join(item.path, 'metadata.json')
-    try:
-        meta = {}
-        if osp.exists(meta_path):
-            with open(meta_path, 'r', encoding='utf-8') as f:
-                loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    meta = loaded
-        meta['verification_status'] = status
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-        saved = True
-    except Exception:
-        pass
+    if normalize_language(item.language) == DEFAULT_LANGUAGE or not item.json_path:
+        # Keep the legacy shared metadata mirror only for English/default projects.
+        meta_path = osp.join(item.path, 'metadata.json')
+        try:
+            meta = {}
+            if osp.exists(meta_path):
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        meta = loaded
+            meta['verification_status'] = status
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            saved = True
+        except Exception:
+            pass
 
     return saved

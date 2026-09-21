@@ -1,3 +1,4 @@
+import json
 import os.path as osp
 import os, re, traceback, sys
 from typing import List, Optional, Tuple, Union
@@ -162,6 +163,9 @@ class MainWindow(mainwindow_cls):
         self._run_imgtrans_wo_textstyle_update = False
         self._render_only = False
         self._render_global_format = None
+        self._batch_render_font_size: Optional[float] = None
+        self._batch_font_size: Optional[float] = None
+        self._batch_active = False
         self._llm_context_dirty = False
 
         self.setupThread()
@@ -182,8 +186,11 @@ class MainWindow(mainwindow_cls):
                 if osp.exists(proj_dir):
                     self.OpenProj(proj_dir)
 
+        has_batch_queue = bool(exec_args.get('exec_paths_json') or exec_args.get('exec_dirs'))
         if shared.HEADLESS:
             self.run_batch(**exec_args)
+        elif has_batch_queue:
+            QTimer.singleShot(800, lambda: self.run_batch(**exec_args))
 
         if shared.ON_MACOS:
             # https://bugreports.qt.io/browse/QTBUG-133215
@@ -1943,7 +1950,7 @@ class MainWindow(mainwindow_cls):
             self.on_export_txt('translation')
         if shared.args.export_source_txt:
             self.on_export_txt('source')
-        if shared.HEADLESS:
+        if shared.HEADLESS or self._batch_active:
             self.run_next_dir()
 
     def postprocess_translations(self, blk_list: List[TextBlock]) -> None:
@@ -1984,7 +1991,13 @@ class MainWindow(mainwindow_cls):
         
         if not inpaint_only:
             for ii, blk in enumerate(blk_list):
-                if self._run_imgtrans_wo_textstyle_update and ffmt_list is not None:
+                batch_font_size = self._batch_render_font_size
+                if batch_font_size is None:
+                    batch_font_size = self._batch_font_size
+                if batch_font_size is not None:
+                    blk.font_size = batch_font_size
+                    blk.rich_text = ''
+                elif self._run_imgtrans_wo_textstyle_update and ffmt_list is not None:
                     blk.fontformat.merge(ffmt_list[ii])
                 else:
                     if override_fnt_size or \
@@ -2063,6 +2076,8 @@ class MainWindow(mainwindow_cls):
                 enable_translate
                 or (
                     self._render_only
+                    and self._batch_render_font_size is None
+                    and self._batch_font_size is None
                     and not self._run_imgtrans_wo_textstyle_update
                 )
             ):
@@ -2229,6 +2244,10 @@ class MainWindow(mainwindow_cls):
             if render_only
             else None
         )
+        if render_only and self._batch_render_font_size is not None:
+            if self._render_global_format is None:
+                self._render_global_format = self.textPanel.formatpanel.global_format.deepcopy()
+            self._render_global_format.font_size = self._batch_render_font_size
 
         if self.bottomBar.textblockChecker.isChecked():
             self.bottomBar.textblockChecker.click()
@@ -2495,8 +2514,22 @@ class MainWindow(mainwindow_cls):
         self.canvas.push_undo_command(PasteSrcItemsCommand(src_widget_list, text_list))
     
     def run_batch(self, exec_dirs: Union[List, str], **kwargs):
-        if not isinstance(exec_dirs, List):
+        exec_paths_json = kwargs.get('exec_paths_json', '')
+        if exec_paths_json:
+            try:
+                loaded_paths = json.loads(exec_paths_json)
+                exec_dirs = loaded_paths if isinstance(loaded_paths, list) else []
+            except Exception as e:
+                LOGGER.warning(f'failed to parse exec_paths_json: {e}')
+                exec_dirs = []
+        elif not isinstance(exec_dirs, list):
             exec_dirs = exec_dirs.split(',')
+        self._batch_render_font_size = kwargs.get('batch_render_font_size')
+        self._batch_font_size = kwargs.get('batch_font_size')
+        batch_translate_target = kwargs.get('batch_translate_target', '')
+        if batch_translate_target:
+            self.on_trans_tgt_changed(str(batch_translate_target))
+        self._exit_on_batch_finish = bool(kwargs.get('exit_on_batch_finish', False))
         valid_dirs = []
         for d in exec_dirs:
             if osp.exists(d):
@@ -2504,12 +2537,21 @@ class MainWindow(mainwindow_cls):
             else:
                 LOGGER.warning(f'target directory {d} does not exist.')
         self.exec_dirs = valid_dirs
+        self._batch_active = len(valid_dirs) > 0
         self.run_next_dir()
 
     def run_next_dir(self):
         if len(self.exec_dirs) == 0:
             while self.imsave_thread.isRunning():
                 time.sleep(0.1)
+            self._batch_active = False
+            if getattr(self, '_exit_on_batch_finish', False):
+                LOGGER.info(f'finished translating all dirs, exiting app...')
+                self.app.quit()
+                return
+            if not shared.HEADLESS:
+                LOGGER.info(f'finished translating all dirs.')
+                return
             LOGGER.info(f'finished translating all dirs, please enter next dirs to translate (separated by comma). enter "exit" to quit app.')
             new_exec_dirs = input()
             if new_exec_dirs.strip().lower() == 'exit':
@@ -2521,7 +2563,7 @@ class MainWindow(mainwindow_cls):
         d = self.exec_dirs.pop(0)
         
         LOGGER.info(f'translating {d} ...')
-        self.openDir(d)
+        self.OpenProj(d)
         shared.pbar = {}
         npages = len(self.imgtrans_proj.pages)
         if npages > 0:
@@ -2533,7 +2575,10 @@ class MainWindow(mainwindow_cls):
                 shared.pbar['translate'] = tqdm(range(npages), desc="Translation")
             if pcfg.module.enable_inpaint:
                 shared.pbar['inpaint'] = tqdm(range(npages), desc="Inpaint")
-        self.on_run_imgtrans()
+        if self._batch_render_font_size is not None:
+            self.on_run_imgtrans(render_only=True)
+        else:
+            self.on_run_imgtrans()
 
     def on_create_errdialog(self, error_msg: str, detail_traceback: str = '', exception_type: str = ''):
         try:

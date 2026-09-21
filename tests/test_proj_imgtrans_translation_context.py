@@ -1,4 +1,6 @@
 import json
+import os
+import os.path as osp
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -87,6 +89,24 @@ class LLMContextConfigTest(unittest.TestCase):
                         getattr(_module_config(**{field: value}), field),
                         expected,
                     )
+
+
+class ProjImgTransLanguageFolderTest(unittest.TestCase):
+
+    def test_language_folder_json_loads_images_from_parent_manga_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manga_dir = osp.join(tmpdir, 'Manga')
+            lang_dir = osp.join(manga_dir, 'IND')
+            os.makedirs(lang_dir)
+            json_path = osp.join(lang_dir, 'imgtrans_Manga.json')
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump({'pages': {'001.png': []}}, f)
+
+            project = ProjImgTrans()
+            with patch.object(project, 'load') as mock_load:
+                project.load_from_json(json_path)
+
+            mock_load.assert_called_once_with(manga_dir, json_path=json_path)
 
     def test_llm_context_settings_roundtrip_directly_under_module(self):
         cfg = ProgramConfig(module=_module_config(

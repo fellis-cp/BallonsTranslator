@@ -19,6 +19,17 @@ The library automatically scans the `TRANSLATED/` directory, discovers all trans
    - Picking any manga card immediately launches **BalloonsTranslator** with that manga folder (`--proj-dir`).
    - Context menu options for opening folders and managing favorites.
 
+3. **Project Language JSONs**:
+   - The reader header can switch between English (`ENG`) and Bahasa Indonesia (`IND`).
+   - English keeps using the existing `imgtrans_*.json` in the manga folder by default.
+   - Bahasa Indonesia uses `IND/imgtrans_*.json`; if that file does not exist yet, the reader creates `IND/` and copies the current manga JSON there.
+
+4. **Batch Translate Selected Manga**:
+   - Tick manga cards with their checkboxes, then click **Batch Selected**.
+   - The reader asks for a target language and font size.
+   - The reader launches one normal **BalloonsTranslator** window and processes the selected projects sequentially.
+   - The selected reader language is respected, so Indonesian batches use `IND/imgtrans_*.json`.
+
 ---
 
 ## 🚀 How to Run

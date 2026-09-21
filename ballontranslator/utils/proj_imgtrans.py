@@ -943,6 +943,16 @@ class ProjImgTrans:
     def load_from_json(self, json_path: str):
         old_dir = self.directory
         directory = osp.dirname(json_path)
+        if osp.basename(directory).upper() in {'ENG', 'IND'}:
+            directory = osp.dirname(directory)
+            try:
+                with open(json_path, 'r', encoding='utf8') as f:
+                    proj_dict = json.loads(f.read())
+                saved_directory = proj_dict.get('directory') if isinstance(proj_dict, dict) else None
+                if isinstance(saved_directory, str) and osp.isdir(saved_directory):
+                    directory = saved_directory
+            except Exception:
+                pass
         try:
             self.load(directory, json_path=json_path)
         except Exception as e:

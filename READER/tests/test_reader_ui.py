@@ -4,6 +4,7 @@ import os
 import os.path as osp
 import tempfile
 import shutil
+import json
 from unittest.mock import patch, MagicMock
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -69,6 +70,63 @@ class TestReaderUI(unittest.TestCase):
             # Trigger timeout callback
             window._on_launch_completed()
             self.assertTrue(window.loading_overlay.isHidden())
+
+    def test_open_manga_item_launches_selected_language_json(self):
+        window = ReaderMainWindow(translated_dir=self.tmp_dir)
+        manga_dir = osp.join(self.tmp_dir, "Test Author", "Test Manga")
+        lang_dir = osp.join(manga_dir, "IND")
+        os.makedirs(lang_dir, exist_ok=True)
+        json_path = osp.join(lang_dir, "imgtrans_Test Manga.json")
+
+        item = MagicMock()
+        item.path = manga_dir
+        item.json_path = json_path
+
+        with patch.object(window, "launch_translator_for_manga") as mock_launch:
+            window.open_manga_item(item)
+
+        mock_launch.assert_called_once_with(json_path)
+
+    def test_language_selector_updates_library_language(self):
+        window = ReaderMainWindow(translated_dir=self.tmp_dir)
+
+        with patch.object(window.library_view, "set_language") as mock_set_language:
+            window.language_combo.setCurrentIndex(1)
+
+        self.assertEqual(window.language, "IND")
+        mock_set_language.assert_called_once_with("IND")
+
+    def test_launch_batch_translate_uses_single_visible_process(self):
+        window = ReaderMainWindow(translated_dir=self.tmp_dir)
+        project_a = osp.join(self.tmp_dir, "A", "imgtrans_A.json")
+        project_b = osp.join(self.tmp_dir, "B", "IND", "imgtrans_B.json")
+
+        with patch("subprocess.Popen") as mock_popen, \
+             patch("os.path.exists", return_value=True):
+            mock_popen.return_value = MagicMock()
+            window.launch_batch_translate([project_a, project_b], "Indonesia", 32.0)
+
+        mock_popen.assert_called_once()
+        cmd = mock_popen.call_args.args[0]
+        self.assertNotIn("--headless", cmd)
+        self.assertIn("--exec-paths-json", cmd)
+        self.assertIn("--batch-translate-target", cmd)
+        self.assertIn("--batch-font-size", cmd)
+        paths_json = cmd[cmd.index("--exec-paths-json") + 1]
+        self.assertEqual(json.loads(paths_json), [project_a, project_b])
+        self.assertEqual(cmd[cmd.index("--batch-translate-target") + 1], "Indonesia")
+        self.assertEqual(cmd[cmd.index("--batch-font-size") + 1], "32.0")
+
+    def test_selection_count_updates_batch_button(self):
+        window = ReaderMainWindow(translated_dir=self.tmp_dir)
+
+        window._on_selection_changed(2)
+        self.assertTrue(window.btn_batch_selected.isEnabled())
+        self.assertEqual(window.btn_batch_selected.text(), "Batch Selected (2)")
+
+        window._on_selection_changed(0)
+        self.assertFalse(window.btn_batch_selected.isEnabled())
+        self.assertEqual(window.btn_batch_selected.text(), "Batch Selected")
 
 
 if __name__ == '__main__':
