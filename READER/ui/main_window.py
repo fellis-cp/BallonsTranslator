@@ -292,7 +292,19 @@ class ReaderMainWindow(QMainWindow):
             LOGGER.warning(f"Could not locate launch script at {launch_script}")
             return
 
-        instance_count = max(1, min(3, int(instance_count), len(project_paths)))
+        if not project_paths:
+            QMessageBox.warning(
+                self,
+                "Batch Translate",
+                "Select one or more manga first.",
+            )
+            return
+
+        try:
+            requested_instances = int(instance_count)
+        except (TypeError, ValueError):
+            requested_instances = 1
+        instance_count = max(1, min(3, requested_instances, len(project_paths)))
         path_groups = [
             project_paths[index::instance_count]
             for index in range(instance_count)

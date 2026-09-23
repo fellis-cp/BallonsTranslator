@@ -148,6 +148,17 @@ class TestReaderUI(unittest.TestCase):
         self.assertIn("--batch-preserve-font-settings", cmd)
         self.assertNotIn("--batch-font-size", cmd)
 
+    def test_launch_batch_translate_ignores_empty_selection(self):
+        window = ReaderMainWindow(translated_dir=self.tmp_dir)
+
+        with patch("subprocess.Popen") as mock_popen, \
+             patch("os.path.exists", return_value=True), \
+             patch("READER.ui.main_window.QMessageBox.warning") as mock_warning:
+            window.launch_batch_translate([], "Indonesia", None)
+
+        mock_popen.assert_not_called()
+        mock_warning.assert_called_once()
+
     def test_selection_count_updates_batch_button(self):
         window = ReaderMainWindow(translated_dir=self.tmp_dir)
 

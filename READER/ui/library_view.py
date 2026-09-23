@@ -44,6 +44,51 @@ def _natural_sort_key(text: str) -> list:
     return [int(token) if token.isdigit() else token.lower() for token in re.split(r"(\d+)", text)]
 
 
+def _language_status_suffix(language: str) -> str:
+    """Return the short label used on reader status badges.
+
+    >>> _language_status_suffix('IND')
+    'ID'
+    >>> _language_status_suffix('ENG')
+    'EN'
+    """
+    return 'ID' if normalize_language(language) == 'IND' else 'EN'
+
+
+def _status_text(status: str, language: str, *, filter_label: bool = False) -> str:
+    suffix = _language_status_suffix(language)
+    if status == 'verified':
+        text = f"Verified {suffix}"
+    elif status == 'needs_fix':
+        text = f"Needs Fix {suffix}"
+    else:
+        text = f"Unverified {suffix}"
+    return f"{text} Only" if filter_label else text
+
+
+def _status_icon(status: str) -> str:
+    if status == 'verified':
+        return "\u2713"
+    if status == 'needs_fix':
+        return "\u26a0"
+    return "\u25cb"
+
+
+def _status_menu_label(status: str, language: str, *, current: bool = False) -> str:
+    label = f"{_status_icon(status)} {_status_text(status, language)}"
+    return f"{label}  (Current)" if current else label
+
+
+def _category_status(category: str) -> Optional[str]:
+    if 'Needs Fix' in category:
+        return 'needs_fix'
+    if 'Unverified' in category:
+        return 'unverified'
+    if 'Verified' in category:
+        return 'verified'
+    return None
+
+
 # ── Background thumbnail loader ───────────────────────────────────────────────
 
 class _ThumbnailSignals(QObject):
@@ -227,14 +272,11 @@ class FolderCardWidget(QFrame):
 
     def matches(self, filter_text: str, category: str) -> bool:
         name_match = (not filter_text) or (filter_text.lower() in self.folder_name.lower())
+        status_filter = _category_status(category)
         if category == "⭐ Favorites Only":
             has_item = any(FAVORITES.is_favorite(it.relative_path) for it in self.manga_items)
-        elif category == "✓ Verified Only":
-            has_item = any(it.verification_status == "verified" for it in self.manga_items)
-        elif category == "⚠ Needs Fix / Retranslate":
-            has_item = any(it.verification_status == "needs_fix" for it in self.manga_items)
-        elif category == "Unverified Only":
-            has_item = any(it.verification_status == "unverified" for it in self.manga_items)
+        elif status_filter is not None:
+            has_item = any(it.verification_status == status_filter for it in self.manga_items)
         else:
             has_item = True
 
@@ -370,26 +412,26 @@ class MangaCardWidget(QFrame):
     def _update_status_badge(self) -> None:
         base_style = "border: none; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: bold;"
         if self.item.verification_status == "verified":
-            self.btn_status.setText("✓ Verified")
+            self.btn_status.setText(_status_menu_label("verified", self.item.language))
             self.btn_status.setStyleSheet(f"{base_style} background-color: #065f46; color: #6ee7b7;")
         elif self.item.verification_status == "needs_fix":
-            self.btn_status.setText("⚠ Needs Fix")
+            self.btn_status.setText(_status_menu_label("needs_fix", self.item.language))
             self.btn_status.setStyleSheet(f"{base_style} background-color: #991b1b; color: #fca5a5;")
         else:
-            self.btn_status.setText("○ Unverified")
+            self.btn_status.setText(_status_menu_label("unverified", self.item.language))
             self.btn_status.setStyleSheet(f"{base_style} background-color: #374151; color: #d1d5db;")
 
     def _on_status_button_clicked(self) -> None:
         menu = QMenu(self)
-        a_ver = menu.addAction("✓ Verified")
-        a_fix = menu.addAction("⚠ Needs Fix")
-        a_unv = menu.addAction("○ Unverified")
+        a_ver = menu.addAction(_status_menu_label("verified", self.item.language))
+        a_fix = menu.addAction(_status_menu_label("needs_fix", self.item.language))
+        a_unv = menu.addAction(_status_menu_label("unverified", self.item.language))
         if self.item.verification_status == "verified":
-            a_ver.setText("✓ Verified  (Current)")
+            a_ver.setText(_status_menu_label("verified", self.item.language, current=True))
         elif self.item.verification_status == "needs_fix":
-            a_fix.setText("⚠ Needs Fix  (Current)")
+            a_fix.setText(_status_menu_label("needs_fix", self.item.language, current=True))
         else:
-            a_unv.setText("○ Unverified  (Current)")
+            a_unv.setText(_status_menu_label("unverified", self.item.language, current=True))
 
         pos = self.btn_status.mapToGlobal(self.btn_status.rect().bottomLeft())
         selected = menu.exec_(pos)
@@ -403,11 +445,8 @@ class MangaCardWidget(QFrame):
     def matches(self, filter_text: str, category: str) -> bool:
         if category == "⭐ Favorites Only" and not FAVORITES.is_favorite(self.item.relative_path):
             return False
-        if category == "✓ Verified Only" and self.item.verification_status != "verified":
-            return False
-        if category == "⚠ Needs Fix / Retranslate" and self.item.verification_status != "needs_fix":
-            return False
-        if category == "Unverified Only" and self.item.verification_status != "unverified":
+        status_filter = _category_status(category)
+        if status_filter is not None and self.item.verification_status != status_filter:
             return False
         if filter_text:
             q = filter_text.lower()
@@ -452,16 +491,16 @@ class MangaCardWidget(QFrame):
         action_batch_render = menu.addAction("Batch Translate Selected")
 
         status_menu = menu.addMenu("Set Status 🏷️")
-        a_ver = status_menu.addAction("✓ Verified")
-        a_fix = status_menu.addAction("⚠ Needs Fix")
-        a_unv = status_menu.addAction("○ Unverified")
+        a_ver = status_menu.addAction(_status_menu_label("verified", self.item.language))
+        a_fix = status_menu.addAction(_status_menu_label("needs_fix", self.item.language))
+        a_unv = status_menu.addAction(_status_menu_label("unverified", self.item.language))
 
         if self.item.verification_status == "verified":
-            a_ver.setText("✓ Verified  (Current)")
+            a_ver.setText(_status_menu_label("verified", self.item.language, current=True))
         elif self.item.verification_status == "needs_fix":
-            a_fix.setText("⚠ Needs Fix  (Current)")
+            a_fix.setText(_status_menu_label("needs_fix", self.item.language, current=True))
         else:
-            a_unv.setText("○ Unverified  (Current)")
+            a_unv.setText(_status_menu_label("unverified", self.item.language, current=True))
 
         action_fav = menu.addAction(
             "Unfavorite" if FAVORITES.is_favorite(self.item.relative_path) else "Favorite ⭐"
@@ -613,13 +652,7 @@ class LibraryView(QWidget):
         t2_layout.setSpacing(10)
 
         self.category_combo = QComboBox()
-        self.category_combo.addItems([
-            "All Manga",
-            "⭐ Favorites Only",
-            "✓ Verified Only",
-            "⚠ Needs Fix / Retranslate",
-            "Unverified Only",
-        ])
+        self._populate_category_combo()
         self.category_combo.currentIndexChanged.connect(self._relayout)
         t2_layout.addWidget(self.category_combo, stretch=1)
 
@@ -777,6 +810,7 @@ class LibraryView(QWidget):
             self._apply_sort()
             self._relayout()
             self._start_thumb_loader()
+            self.selection_changed.emit(0)
 
         finally:
             self.loading_overlay.stop_loading()
@@ -788,11 +822,36 @@ class LibraryView(QWidget):
 
     def set_language(self, language: str) -> None:
         self.language = normalize_language(language)
+        self._populate_category_combo()
         self.scan_library()
+
+    def _category_label(self, status: str) -> str:
+        return f"{_status_icon(status)} {_status_text(status, self.language, filter_label=True)}"
+
+    def _populate_category_combo(self) -> None:
+        current_status = _category_status(self.category_combo.currentText()) if hasattr(self, 'category_combo') else None
+        current_is_favorites = (
+            hasattr(self, 'category_combo')
+            and self.category_combo.currentText() == "⭐ Favorites Only"
+        )
+        self.category_combo.blockSignals(True)
+        self.category_combo.clear()
+        self.category_combo.addItems([
+            "All Manga",
+            "⭐ Favorites Only",
+            self._category_label("verified"),
+            self._category_label("needs_fix"),
+            self._category_label("unverified"),
+        ])
+        if current_status is not None:
+            self.category_combo.setCurrentText(self._category_label(current_status))
+        elif current_is_favorites:
+            self.category_combo.setCurrentText("⭐ Favorites Only")
+        self.category_combo.blockSignals(False)
 
     def _on_batch_render_requested(self, item: MangaItem) -> None:
         batch_items = self.selected_items()
-        if item not in batch_items:
+        if not batch_items:
             batch_items = [item]
         self.batch_render_requested.emit(batch_items)
 
@@ -1071,15 +1130,15 @@ class LibraryView(QWidget):
         verified = sum(1 for it in items if it.verification_status == "verified")
         needs_fix = sum(1 for it in items if it.verification_status == "needs_fix")
         unverified = sum(1 for it in items if it.verification_status == "unverified")
-        self.pill_verified.setText(f"\u2713 Verified  {verified}")
-        self.pill_needs_fix.setText(f"\u26a0 Needs Fix  {needs_fix}")
-        self.pill_unverified.setText(f"\u25cb Unverified  {unverified}")
+        self.pill_verified.setText(f"{_status_icon('verified')} {_status_text('verified', self.language)}  {verified}")
+        self.pill_needs_fix.setText(f"{_status_icon('needs_fix')} {_status_text('needs_fix', self.language)}  {needs_fix}")
+        self.pill_unverified.setText(f"{_status_icon('unverified')} {_status_text('unverified', self.language)}  {unverified}")
 
     def _on_pill_clicked(self, status: str) -> None:
         mapping = {
-            "verified": "\u2713 Verified Only",
-            "needs_fix": "\u26a0 Needs Fix / Retranslate",
-            "unverified": "Unverified Only",
+            "verified": self._category_label("verified"),
+            "needs_fix": self._category_label("needs_fix"),
+            "unverified": self._category_label("unverified"),
         }
         pills = {
             "verified": self.pill_verified,

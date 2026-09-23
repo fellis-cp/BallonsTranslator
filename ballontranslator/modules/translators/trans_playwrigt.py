@@ -54,6 +54,29 @@ def _sleep_with_stop(
     return bool((stop_event and stop_event.is_set()) or (cancel_checker and cancel_checker()))
 
 
+def _stop_browser_worker(worker: Optional[threading.Thread], timeout: float = 15.0) -> bool:
+    """Stop a browser worker and wait before its profile can be reused.
+
+    The worker owns the Playwright objects, so shutdown is requested through
+    its cancellation flag and completed on the worker thread.  Joining here
+    prevents a provider switch from launching a second context against the
+    same persistent profile.
+    """
+    if worker is None:
+        return True
+    cancel = getattr(worker, "cancel_current_task", None)
+    if callable(cancel):
+        cancel()
+    if hasattr(worker, "running"):
+        worker.running = False
+    if worker.is_alive() and threading.current_thread() is not worker:
+        worker.join(timeout=timeout)
+        if worker.is_alive():
+            logger.warning("Browser worker did not exit before the shutdown timeout.")
+            return False
+    return True
+
+
 def _extract_json_block(text: str) -> Optional[str]:
     """
     Extract the outermost JSON object or array from *text*, stripping code fences
@@ -556,16 +579,23 @@ class GeminiBrowserWorker(threading.Thread):
         self.cancel_requested = False
 
     def cancel_current_task(self):
-        """Immediately cancel active and queued tasks for this worker."""
+        """Request cancellation without touching Playwright from this thread.
+
+        The sync Playwright API is thread-affine.  Browser interaction is
+        therefore deliberately left to ``run()`` and its translation methods.
+        """
         self.cancel_requested = True
-        while not self.task_queue.empty():
+        while True:
             try:
                 task = self.task_queue.get_nowait()
                 task.done_event.set()
                 self.task_queue.task_done()
             except queue.Empty:
                 break
-        self._trigger_browser_stop()
+
+    def reset_cancel(self):
+        """Allow a new task after the previous task was cancelled."""
+        self.cancel_requested = False
 
     def _trigger_browser_stop(self):
         if self.page is None:
@@ -596,8 +626,8 @@ class GeminiBrowserWorker(threading.Thread):
                 logger.info(f"Instance {self.instance_id}: Launching Browser...")
                 browser = p.chromium.launch_persistent_context(
                     user_data_dir=self.profile_dir,
-                    channel="chrome",
-                    headless=True,
+                    channel="chromium",
+                    headless=False,
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
                 page = browser.pages[0]
@@ -607,7 +637,6 @@ class GeminiBrowserWorker(threading.Thread):
                 while self.running:
                     task = None
                     try:
-                        self.cancel_requested = False
                         task = self.task_queue.get(timeout=1)
                         if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                             continue
@@ -1017,16 +1046,19 @@ class DeepSeekBrowserWorker(threading.Thread):
         self.translate_count = 0
 
     def cancel_current_task(self):
-        """Immediately cancel active and queued tasks for this worker."""
+        """Request cancellation without touching Playwright from this thread."""
         self.cancel_requested = True
-        while not self.task_queue.empty():
+        while True:
             try:
                 task = self.task_queue.get_nowait()
                 task.done_event.set()
                 self.task_queue.task_done()
             except queue.Empty:
                 break
-        self._trigger_browser_stop()
+
+    def reset_cancel(self):
+        """Allow a new task after the previous task was cancelled."""
+        self.cancel_requested = False
 
     def _trigger_browser_stop(self):
         if self.page is None:
@@ -1057,7 +1089,7 @@ class DeepSeekBrowserWorker(threading.Thread):
                 logger.info(f"DeepSeek Instance {self.instance_id}: Launching Browser...")
                 browser = p.chromium.launch_persistent_context(
                     user_data_dir=self.profile_dir,
-                    channel="chrome",
+                    channel="chromium",
                     headless=False,
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
@@ -1068,7 +1100,6 @@ class DeepSeekBrowserWorker(threading.Thread):
                 while self.running:
                     task = None
                     try:
-                        self.cancel_requested = False
                         task = self.task_queue.get(timeout=1)
                         if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                             continue
@@ -1540,16 +1571,19 @@ class DeepLBrowserWorker(threading.Thread):
         self.translate_count = 0
 
     def cancel_current_task(self):
-        """Immediately cancel active and queued tasks for this worker."""
+        """Request cancellation without touching Playwright from this thread."""
         self.cancel_requested = True
-        while not self.task_queue.empty():
+        while True:
             try:
                 task = self.task_queue.get_nowait()
                 task.done_event.set()
                 self.task_queue.task_done()
             except queue.Empty:
                 break
-        self._trigger_browser_stop()
+
+    def reset_cancel(self):
+        """Allow a new task after the previous task was cancelled."""
+        self.cancel_requested = False
 
     def _trigger_browser_stop(self):
         if self.page is None:
@@ -1571,7 +1605,7 @@ class DeepLBrowserWorker(threading.Thread):
                 logger.info(f"DeepL Instance {self.instance_id}: Launching Browser...")
                 browser = p.chromium.launch_persistent_context(
                     user_data_dir=self.profile_dir,
-                    channel="chrome",
+                    channel="chromium",
                     headless=False,
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
@@ -1582,7 +1616,6 @@ class DeepLBrowserWorker(threading.Thread):
                 while self.running:
                     task = None
                     try:
-                        self.cancel_requested = False
                         task = self.task_queue.get(timeout=1)
                         if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                             continue
@@ -1881,16 +1914,19 @@ class NoTrackBrowserWorker(threading.Thread):
         self.running = True
 
     def cancel_current_task(self):
-        """Immediately cancel active and queued tasks for this worker."""
+        """Request cancellation without touching Playwright from this thread."""
         self.cancel_requested = True
-        while not self.task_queue.empty():
+        while True:
             try:
                 task = self.task_queue.get_nowait()
                 task.done_event.set()
                 self.task_queue.task_done()
             except queue.Empty:
                 break
-        self._trigger_browser_stop()
+
+    def reset_cancel(self):
+        """Allow a new task after the previous task was cancelled."""
+        self.cancel_requested = False
 
     def _trigger_browser_stop(self):
         if self.page is None:
@@ -1921,7 +1957,7 @@ class NoTrackBrowserWorker(threading.Thread):
                 logger.info(f"NoTrack Instance {self.instance_id}: Launching Browser...")
                 browser = p.chromium.launch_persistent_context(
                     user_data_dir=self.profile_dir,
-                    channel="chrome",
+                    channel="chromium",
                     headless=False,
                     args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
                 )
@@ -1932,7 +1968,6 @@ class NoTrackBrowserWorker(threading.Thread):
                 while self.running:
                     task = None
                     try:
-                        self.cancel_requested = False
                         task = self.task_queue.get(timeout=1)
                         if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                             continue
@@ -2349,6 +2384,7 @@ class TransGemini(BaseTranslator):
         self.repair_worker: Optional[JsonRepairWorker] = None
         self.stop_event: Optional[threading.Event] = None
         self._force_stopped: bool = False
+        self._translation_lock = threading.RLock()
         self.instance_id = self._acquire_instance_id()
         super().__init__(*args, **kwargs)
 
@@ -2427,8 +2463,10 @@ class TransGemini(BaseTranslator):
                 logger.debug(f"Could not acquire lock slot {i}: {e}")
                 continue
 
-        logger.warning("All browser profile instances (1-3) are locked. Falling back to instance 3.")
-        return 3
+        raise RuntimeError(
+            "All browser profile instances (1-3) are already in use. "
+            "Close another Playwright translator instance before starting a new one."
+        )
 
     def _setup_translator(self):
         self.lang_map = {
@@ -2473,7 +2511,8 @@ class TransGemini(BaseTranslator):
             
             if worker_provider != active_provider:
                 logger.info(f"Stopping worker for {worker_provider} to switch to {active_provider}")
-                self.worker.running = False
+                if not _stop_browser_worker(self.worker):
+                    raise RuntimeError("The previous browser translator did not stop safely.")
                 self.worker = None
 
         if self.worker and self.worker.is_alive(): return
@@ -2503,6 +2542,11 @@ class TransGemini(BaseTranslator):
             self._setup_translator()
 
     def _translate(self, src_list: List[str]) -> List[str]:
+        """Serialize requests so cancellation and retries cannot overlap."""
+        with self._translation_lock:
+            return self._translate_impl(src_list)
+
+    def _translate_impl(self, src_list: List[str]) -> List[str]:
         if not src_list: return src_list
         self._force_stopped = False
         if (self.stop_event and self.stop_event.is_set()) or self._force_stopped:
@@ -2556,6 +2600,9 @@ class TransGemini(BaseTranslator):
                 needs_refresh=needs_refresh, timeout=calc_timeout, mode=mode,
                 interval=configured_interval, stop_event=self.stop_event
             )
+            reset_cancel = getattr(self.worker, "reset_cancel", None)
+            if callable(reset_cancel):
+                reset_cancel()
             self.worker.task_queue.put(task)
             
             wait_timeout = calc_timeout + 30
