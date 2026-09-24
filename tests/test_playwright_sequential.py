@@ -5,6 +5,7 @@ import time
 from ballontranslator.modules.translators.trans_playwrigt import (
     TranslationTask,
     TransGemini,
+    AIStudioBrowserWorker,
     _extract_json_block,
     _parse_or_repair_json,
     _extract_translations_from_data,
@@ -36,6 +37,18 @@ class TestPlaywrightSequential(unittest.TestCase):
 
         t.updateParam("mode", "Sequential")
         self.assertEqual(t.mode, "Sequential")
+
+    def test_ai_studio_provider_option(self):
+        t = TransGemini(lang_source="English", lang_target="Bahasa Indonesia", raise_unsupported_lang=False)
+        self.assertIn("AI Studio", t.params["provider"]["options"])
+        t.params["provider"]["value"] = "AI Studio"
+        self.assertEqual(t.provider, "AI Studio")
+        self.assertIn("aistudio_profile_instance_", t.profile_path)
+        self.assertEqual(
+            AIStudioBrowserWorker.CHAT_URL,
+            "https://aistudio.google.com/prompts/new_chat?model=gemini-flash-lite-latest",
+        )
+        self.assertFalse(AIStudioBrowserWorker.SEND_WITH_ENTER)
 
     def test_single_item_json_parsing(self):
         item_id = 1

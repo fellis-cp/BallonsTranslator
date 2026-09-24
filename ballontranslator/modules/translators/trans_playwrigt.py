@@ -7,6 +7,8 @@ import uuid
 import os
 import logging
 import sys
+import random
+from contextlib import ExitStack, contextmanager
 from typing import List, Dict, Optional, Callable
 from playwright.sync_api import sync_playwright
 from .base import BaseTranslator, register_translator
@@ -75,6 +77,108 @@ def _stop_browser_worker(worker: Optional[threading.Thread], timeout: float = 15
             logger.warning("Browser worker did not exit before the shutdown timeout.")
             return False
     return True
+
+
+# --- Stealth browser launcher (SeleniumBase UC Mode + Playwright over CDP) ---
+
+# Set env var TRANSLATOR_USE_SB_UC=0 to skip SeleniumBase and use plain Playwright.
+USE_SB_UC = os.environ.get("TRANSLATOR_USE_SB_UC", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _quiet_close(obj) -> None:
+    """Close *obj*, ignoring errors (it may already be closed/disconnected)."""
+    try:
+        obj.close()
+    except Exception:
+        pass
+
+
+def _pick_page(context):
+    """Prefer the tab that is actually showing a site; create one if none exist."""
+    pages = list(context.pages)
+    for pg in pages:
+        try:
+            if pg.url.startswith("http"):
+                return pg
+        except Exception:
+            continue
+    return pages[0] if pages else context.new_page()
+
+
+def _enter_sb_uc_cdp(stack: ExitStack, profile_dir: str, start_url: str, log_prefix: str):
+    """
+    Start a real, stealthy Chrome through SeleniumBase UC Mode, switch it to CDP
+    Mode (chromedriver detaches, so there is no webdriver footprint), and attach
+    Playwright to it with connect_over_cdp().
+
+    Everything opened is registered on *stack*. Teardown runs LIFO: Playwright
+    disconnects, the Playwright driver stops, then SeleniumBase quits Chrome.
+    Must be called on the worker thread that will use the returned page.
+    """
+    from seleniumbase import SB  # imported lazily so the module loads without it
+
+    sb_kwargs = dict(uc=True, headless=False, user_data_dir=profile_dir)
+    if sys.platform.startswith("linux"):
+        sb_kwargs["chromium_arg"] = "--ozone-platform=x11"
+
+    # SeleniumBase must be up *before* sync_playwright() starts: get_endpoint_url()
+    # patches asyncio (nest_asyncio) for the current thread.
+    sb = stack.enter_context(SB(**sb_kwargs))
+    sb.activate_cdp_mode(start_url)
+    endpoint_url = sb.cdp.get_endpoint_url()
+    logger.info(f"{log_prefix}: SeleniumBase UC/CDP browser ready at {endpoint_url}")
+
+    p = stack.enter_context(sync_playwright())
+    browser = p.chromium.connect_over_cdp(endpoint_url)
+    stack.callback(_quiet_close, browser)
+    if not browser.contexts:
+        raise RuntimeError("CDP browser exposed no default context.")
+    context = browser.contexts[0]
+    return context, _pick_page(context)
+
+
+def _enter_plain_playwright(stack: ExitStack, profile_dir: str):
+    """Original launch path (plain Playwright Chromium) used as a fallback."""
+    p = stack.enter_context(sync_playwright())
+    context = p.chromium.launch_persistent_context(
+        user_data_dir=profile_dir,
+        channel="chromium",
+        headless=False,
+        args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"],
+    )
+    stack.callback(_quiet_close, context)
+    return context, context.pages[0]
+
+
+@contextmanager
+def _browser_session(profile_dir: str, start_url: str, log_prefix: str = "Instance"):
+    """
+    Context manager yielding ``(context, page)`` for a worker thread.
+
+    Tries SeleniumBase UC Mode + CDP first; if SeleniumBase is missing or fails
+    to start, cleans up and falls back to plain Playwright so translation still
+    works. All resources are released on exit, including on exceptions.
+    """
+    stack = ExitStack()
+    try:
+        result = None
+        if USE_SB_UC:
+            try:
+                result = _enter_sb_uc_cdp(stack, profile_dir, start_url, log_prefix)
+            except ImportError:
+                logger.warning(f"{log_prefix}: seleniumbase not installed "
+                               f"(pip install seleniumbase); using plain Playwright.")
+            except Exception as e:
+                logger.warning(f"{log_prefix}: SeleniumBase UC/CDP launch failed ({e!r}); "
+                               f"falling back to plain Playwright.")
+            if result is None:
+                stack.close()          # tear down any half-started SB/Playwright
+                stack = ExitStack()
+        if result is None:
+            result = _enter_plain_playwright(stack, profile_dir)
+        yield result
+    finally:
+        stack.close()
 
 
 def _extract_json_block(text: str) -> Optional[str]:
@@ -568,6 +672,16 @@ class GeminiBrowserWorker(threading.Thread):
     """
     Worker automating the Google Gemini interface to perform translations.
     """
+    CHAT_URL = "https://gemini.google.com"
+    INPUT_SEL = "div[contenteditable='true']"
+    RESPONSE_SEL = ".markdown, .message-content"
+    STOP_SEL = "button[aria-label*='Stop'], button[aria-label*='Berhenti'], button[aria-label*='停止'], mat-icon:has-text('stop')"
+    SEND_SEL = "button[aria-label*='Send'], button[aria-label*='Kirim'], button[aria-label*='送信'], button.send-button"
+    INPUT_WAIT_MS = 30000
+    TRANSLATE_INPUT_WAIT_MS = 15000
+    SEND_WITH_ENTER = True
+    LOG_PREFIX = "Instance"
+
     def __init__(self, profile_dir: str, instance_id: int, repair_worker: Optional[JsonRepairWorker] = None):
         super().__init__(daemon=True, name=f"GeminiWorker-{instance_id}")
         self.profile_dir = profile_dir
@@ -601,11 +715,10 @@ class GeminiBrowserWorker(threading.Thread):
         if self.page is None:
             return
         try:
-            stop_selectors = "button[aria-label*='Stop'], button[aria-label*='Berhenti'], button[aria-label*='停止'], mat-icon:has-text('stop')"
-            for btn in self.page.query_selector_all(stop_selectors):
+            for btn in self.page.query_selector_all(self.STOP_SEL):
                 if btn.is_visible():
                     btn.click()
-                    logger.info(f"Instance {self.instance_id}: Clicked browser Stop button.")
+                    logger.info(f"{self.LOG_PREFIX} {self.instance_id}: Clicked browser Stop button.")
                     break
         except Exception:
             pass
@@ -622,17 +735,10 @@ class GeminiBrowserWorker(threading.Thread):
                 subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
             except Exception as e:
                 logger.error(f"Instance {self.instance_id}: Failed to run playwright install chromium: {e}")
-            with sync_playwright() as p:
+            with _browser_session(self.profile_dir, self.CHAT_URL, f"Instance {self.instance_id}") as (browser, page):
                 logger.info(f"Instance {self.instance_id}: Launching Browser...")
-                browser = p.chromium.launch_persistent_context(
-                    user_data_dir=self.profile_dir,
-                    channel="chromium",
-                    headless=False,
-                    args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
-                )
-                page = browser.pages[0]
                 self.page = page
-                self._safe_goto(page, "https://gemini.google.com", wait_extra=True)
+                self._safe_goto(page, self.CHAT_URL, wait_extra=True)
 
                 while self.running:
                     task = None
@@ -641,8 +747,8 @@ class GeminiBrowserWorker(threading.Thread):
                         if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                             continue
                         if task.needs_refresh:
-                            logger.info(f"Instance {self.instance_id}: Retry detected. Refreshing page...")
-                            self._safe_goto(page, "https://gemini.google.com", wait_extra=True)
+                            logger.info(f"{self.LOG_PREFIX} {self.instance_id}: Retry detected. Refreshing page...")
+                            self._safe_goto(page, self.CHAT_URL, wait_extra=True)
                         
                         task.result = self._do_translate(page, task)
                         
@@ -675,12 +781,11 @@ class GeminiBrowserWorker(threading.Thread):
 
     def _wait_for_idle(self, page, timeout: float = 10.0, stop_event: Optional[threading.Event] = None):
         start = time.time()
-        stop_selectors = "button[aria-label*='Stop'], button[aria-label*='Berhenti'], button[aria-label*='停止'], mat-icon:has-text('stop')"
         while (time.time() - start) < timeout:
             if (stop_event and stop_event.is_set()) or self.cancel_requested:
                 break
             try:
-                stop_btns = page.query_selector_all(stop_selectors)
+                stop_btns = page.query_selector_all(self.STOP_SEL)
                 if not stop_btns:
                     break
             except Exception:
@@ -700,12 +805,12 @@ class GeminiBrowserWorker(threading.Thread):
         time.sleep(0.3)
         if (stop_event and stop_event.is_set()) or self.cancel_requested:
             return False
-        page.keyboard.press("Enter")
-        time.sleep(0.5)
-        # Click send button as fallback if text remains unsubmitted
-        send_selectors = "button[aria-label*='Send'], button[aria-label*='Kirim'], button[aria-label*='送信'], button.send-button"
+        if self.SEND_WITH_ENTER:
+            page.keyboard.press("Enter")
+            time.sleep(0.5)
+        # Click send/run as fallback if text remains unsubmitted
         try:
-            send_btns = page.query_selector_all(send_selectors)
+            send_btns = page.query_selector_all(self.SEND_SEL)
             if send_btns and send_btns[-1].is_enabled():
                 send_btns[-1].click()
         except Exception:
@@ -715,7 +820,7 @@ class GeminiBrowserWorker(threading.Thread):
     def _safe_goto(self, page, url: str, wait_extra: bool = False):
         try:
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
-            page.wait_for_selector("div[contenteditable='true']", timeout=30000)
+            page.wait_for_selector(self.INPUT_SEL, timeout=self.INPUT_WAIT_MS)
             if wait_extra:
                 time.sleep(1)
         except Exception as e:
@@ -734,9 +839,9 @@ class GeminiBrowserWorker(threading.Thread):
     def _do_translate_batch(self, page, task: TranslationTask) -> Optional[List[str]]:
         if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
             return None
-        input_sel = "div[contenteditable='true']"
+        input_sel = self.INPUT_SEL
         try:
-            page.wait_for_selector(input_sel, timeout=15000)
+            page.wait_for_selector(input_sel, timeout=self.TRANSLATE_INPUT_WAIT_MS)
             if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                 return None
             batch_token = f"BTCH_{uuid.uuid4().hex[:6]}"
@@ -797,7 +902,7 @@ class GeminiBrowserWorker(threading.Thread):
                     self._trigger_browser_stop()
                     return None
                 time.sleep(0.3) 
-                responses = page.query_selector_all(".markdown, .message-content")
+                responses = page.query_selector_all(self.RESPONSE_SEL)
                 if not responses:
                     continue
                 
@@ -862,7 +967,7 @@ class GeminiBrowserWorker(threading.Thread):
                                 self._trigger_browser_stop()
                                 return None
                             time.sleep(0.3)
-                            resp_els = page.query_selector_all(".markdown, .message-content")
+                            resp_els = page.query_selector_all(self.RESPONSE_SEL)
                             if not resp_els: continue
                             rep_text = resp_els[-1].inner_text()
                             if batch_token in rep_text:
@@ -889,9 +994,9 @@ class GeminiBrowserWorker(threading.Thread):
     def _do_translate_sequential(self, page, task: TranslationTask) -> Optional[List[str]]:
         if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
             return None
-        input_sel = "div[contenteditable='true']"
+        input_sel = self.INPUT_SEL
         try:
-            page.wait_for_selector(input_sel, timeout=15000)
+            page.wait_for_selector(input_sel, timeout=self.TRANSLATE_INPUT_WAIT_MS)
             if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                 return None
 
@@ -926,7 +1031,7 @@ class GeminiBrowserWorker(threading.Thread):
                 self._wait_for_idle(page, timeout=10.0, stop_event=task.stop_event)
 
                 # Record existing response count before sending this item to avoid reading prior turns
-                existing_responses = page.query_selector_all(".markdown, .message-content")
+                existing_responses = page.query_selector_all(self.RESPONSE_SEL)
                 initial_count = len(existing_responses)
 
                 item_token = f"ID_{item_id}_{uuid.uuid4().hex[:4]}"
@@ -965,7 +1070,7 @@ class GeminiBrowserWorker(threading.Thread):
                         self._trigger_browser_stop()
                         return None
                     time.sleep(0.3)
-                    responses = page.query_selector_all(".markdown, .message-content")
+                    responses = page.query_selector_all(self.RESPONSE_SEL)
                     if len(responses) <= initial_count:
                         continue
 
@@ -1026,6 +1131,217 @@ class GeminiBrowserWorker(threading.Thread):
             logger.error(f"Instance {self.instance_id}: [LOGIC_ERROR_SEQUENTIAL] {e}")
             return None
 
+
+#--- Google AI Studio Browser Worker ---
+class AIStudioBrowserWorker(GeminiBrowserWorker):
+    """
+    Worker automating Google AI Studio chat
+    (https://aistudio.google.com/prompts/new_chat?model=gemini-flash-lite-latest).
+
+    Enter inserts a newline in this UI, so prompts are submitted with the Run button.
+
+    >>> AIStudioBrowserWorker.CHAT_URL.startswith("https://aistudio.google.com/prompts/new_chat")
+    True
+    >>> AIStudioBrowserWorker.SEND_WITH_ENTER
+    False
+    """
+    CHAT_URL = "https://aistudio.google.com/prompts/new_chat"
+    INPUT_SEL = (
+        'ms-prompt-box ms-autosize-textarea textarea, '
+        'ms-prompt-box textarea[aria-label="Enter a prompt"], '
+        "ms-prompt-box textarea, "
+        'textarea[aria-label="Enter a prompt"]'
+    )
+    RESPONSE_SEL = (
+        "ms-chat-turn .chat-turn-container.model, "
+        "ms-chat-turn ms-cmark-node, "
+        "ms-chat-turn ms-text-chunk, "
+        "ms-chat-turn .markdown"
+    )
+    STOP_SEL = (
+        'ms-prompt-box button[aria-label*="Stop"], '
+        'button[aria-label*="Stop"], '
+        "ms-run-button button[aria-label*='Stop']"
+    )
+    SEND_SEL = (
+        'ms-prompt-box ms-run-button button[aria-label="Run"], '
+        'ms-prompt-box button[aria-label="Run"][type="submit"], '
+        'button[aria-label="Run"].run-button, '
+        'ms-run-button button[type="submit"]'
+    )
+    INPUT_WAIT_MS = 120000
+    TRANSLATE_INPUT_WAIT_MS = 90000
+    SEND_WITH_ENTER = False
+    LOG_PREFIX = "AI Studio Instance"
+
+    # Challenge handling: if Google shows CAPTCHA / "unusual traffic", stop and
+    # wait for the user to solve it manually instead of trying to bypass it.
+    CHALLENGE_SEL = 'iframe[src*="recaptcha"], iframe[title*="reCAPTCHA"]'
+    CHALLENGE_POLL_S = 5
+    CHALLENGE_MAX_WAIT_S = 600
+
+    # Pacing between prompts (seconds). Uneven on purpose, with an occasional long break.
+    GAP_MIN_S = 6.0
+    GAP_MAX_S = 18.0
+    LONG_BREAK_CHANCE = 0.08
+    LONG_BREAK_MIN_S = 25.0
+    LONG_BREAK_MAX_S = 70.0
+
+    def __init__(self, profile_dir: str, instance_id: int, repair_worker: Optional[JsonRepairWorker] = None):
+        super().__init__(profile_dir, instance_id, repair_worker=repair_worker)
+        self.name = f"AIStudioWorker-{instance_id}"
+        self._last_send_at = 0.0
+
+    # ------------------------------------------------------------------ helpers
+
+    def _cancelled(self, stop_event: Optional[threading.Event] = None) -> bool:
+        return bool((stop_event and stop_event.is_set()) or self.cancel_requested)
+
+    def _sleep(self, seconds: float, stop_event: Optional[threading.Event] = None) -> bool:
+        """Interruptible sleep. Returns False if cancelled while waiting."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if self._cancelled(stop_event):
+                return False
+            time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+        return not self._cancelled(stop_event)
+
+    def _pace(self, stop_event: Optional[threading.Event] = None) -> bool:
+        """Wait so that consecutive prompts are separated by an irregular gap."""
+        gap = random.uniform(self.GAP_MIN_S, self.GAP_MAX_S)
+        if random.random() < self.LONG_BREAK_CHANCE:
+            gap += random.uniform(self.LONG_BREAK_MIN_S, self.LONG_BREAK_MAX_S)
+        remaining = gap - (time.monotonic() - self._last_send_at)
+        if self._last_send_at and remaining > 0:
+            return self._sleep(remaining, stop_event)
+        return not self._cancelled(stop_event)
+
+    def _human_click(self, page, el) -> None:
+        """Move the mouse to a random point inside the element, then click there."""
+        try:
+            bb = el.bounding_box()
+            if not bb:
+                el.click()
+                return
+            x = bb["x"] + bb["width"] * random.uniform(0.3, 0.7)
+            y = bb["y"] + bb["height"] * random.uniform(0.3, 0.7)
+            page.mouse.move(x, y, steps=random.randint(8, 20))
+            time.sleep(random.uniform(0.1, 0.3))
+            page.mouse.click(x, y)
+        except Exception:
+            el.click()
+
+    def _page_has_challenge(self, page) -> bool:
+        try:
+            url = (page.url or "").lower()
+            if "google.com/sorry" in url:
+                return True
+            return page.query_selector(self.CHALLENGE_SEL) is not None
+        except Exception:
+            return False
+
+    def _wait_for_manual_challenge(self, page, stop_event: Optional[threading.Event] = None) -> bool:
+        """Pause until the user solves the CAPTCHA by hand. Returns False on cancel/timeout."""
+        logger.warning(
+            f"{self.LOG_PREFIX} {self.instance_id}: Verification/CAPTCHA detected. "
+            f"Please solve it manually in the browser (waiting up to {self.CHALLENGE_MAX_WAIT_S}s)."
+        )
+        waited = 0.0
+        while waited < self.CHALLENGE_MAX_WAIT_S:
+            if not self._sleep(self.CHALLENGE_POLL_S, stop_event):
+                return False
+            waited += self.CHALLENGE_POLL_S
+            if not self._page_has_challenge(page):
+                logger.info(f"{self.LOG_PREFIX} {self.instance_id}: Verification cleared, continuing.")
+                self._sleep(random.uniform(2, 5), stop_event)
+                return True
+        logger.error(f"{self.LOG_PREFIX} {self.instance_id}: Verification not solved in time, giving up.")
+        return False
+
+    # ------------------------------------------------------------------ navigation
+
+    def _safe_goto(self, page, url: str, wait_extra: bool = False):
+        try:
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            if "accounts.google.com" in (page.url or ""):
+                logger.info(
+                    f"{self.LOG_PREFIX} {self.instance_id}: Sign in to Google AI Studio in the opened browser..."
+                )
+            if self._page_has_challenge(page):
+                self._wait_for_manual_challenge(page)
+            page.wait_for_selector(self.INPUT_SEL, timeout=self.INPUT_WAIT_MS)
+            if wait_extra:
+                time.sleep(random.uniform(0.8, 1.6))
+        except Exception as e:
+            logger.warning(f"{self.LOG_PREFIX} {self.instance_id}: Navigation failed ({e}). Reloading...")
+            try:
+                page.reload()
+                time.sleep(random.uniform(4, 7))
+            except Exception as reload_err:
+                logger.debug(f"{self.LOG_PREFIX} {self.instance_id}: Reload also failed: {reload_err}")
+
+    # ------------------------------------------------------------------ sending
+
+    def _send_text_to_chat(self, page, input_sel: str, text: str, stop_event: Optional[threading.Event] = None) -> bool:
+        if self._cancelled(stop_event):
+            return False
+
+        # Stop and wait for the user if Google asks for verification.
+        if self._page_has_challenge(page) and not self._wait_for_manual_challenge(page, stop_event):
+            return False
+
+        # Irregular gap since the previous prompt.
+        if not self._pace(stop_event):
+            return False
+
+        page.wait_for_selector(input_sel, timeout=self.TRANSLATE_INPUT_WAIT_MS)
+        box = page.query_selector(input_sel)
+        if box is None:
+            return False
+
+        self._human_click(page, box)
+        time.sleep(random.uniform(0.2, 0.4))
+
+        if self._cancelled(stop_event):
+            return False
+
+        # fill() replaces the whole textarea content, so no Ctrl+A/Backspace is needed.
+        try:
+            box.fill(text)
+        except Exception:
+            # Fallback path only: clear manually, then insert.
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            time.sleep(random.uniform(0.1, 0.2))
+            page.keyboard.insert_text(text)
+
+        # Short pause after the text lands, before pressing Run.
+        time.sleep(random.uniform(0.5, 1.0))
+
+        if self._cancelled(stop_event):
+            return False
+
+        try:
+            send_btns = page.query_selector_all(self.SEND_SEL)
+            clicked = False
+            for btn in reversed(list(send_btns)):
+                if btn.is_visible() and btn.is_enabled():
+                    time.sleep(random.uniform(0.2, 0.5))
+                    self._human_click(page, btn)
+                    clicked = True
+                    break
+            if not clicked:
+                time.sleep(random.uniform(0.2, 0.4))
+                page.keyboard.press("Control+Enter")
+        except Exception:
+            try:
+                time.sleep(0.3)
+                page.keyboard.press("Control+Enter")
+            except Exception:
+                pass
+
+        self._last_send_at = time.monotonic()
+        return True
 # --- DeepSeek Browser Worker ---
 
 class DeepSeekBrowserWorker(threading.Thread):
@@ -1085,15 +1401,8 @@ class DeepSeekBrowserWorker(threading.Thread):
                 subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
             except Exception as e:
                 logger.error(f"DeepSeek Instance {self.instance_id}: Failed to run playwright install chromium: {e}")
-            with sync_playwright() as p:
+            with _browser_session(self.profile_dir, "https://chat.deepseek.com", f"DeepSeek Instance {self.instance_id}") as (browser, page):
                 logger.info(f"DeepSeek Instance {self.instance_id}: Launching Browser...")
-                browser = p.chromium.launch_persistent_context(
-                    user_data_dir=self.profile_dir,
-                    channel="chromium",
-                    headless=False,
-                    args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
-                )
-                page = browser.pages[0]
                 self.page = page
                 self._safe_goto(page, "https://chat.deepseek.com", wait_extra=True)
 
@@ -1601,15 +1910,8 @@ class DeepLBrowserWorker(threading.Thread):
                 subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
             except Exception as e:
                 logger.error(f"DeepL Instance {self.instance_id}: Failed to run playwright install chromium: {e}")
-            with sync_playwright() as p:
+            with _browser_session(self.profile_dir, "https://www.deepl.com/translator#auto/id", f"DeepL Instance {self.instance_id}") as (browser, page):
                 logger.info(f"DeepL Instance {self.instance_id}: Launching Browser...")
-                browser = p.chromium.launch_persistent_context(
-                    user_data_dir=self.profile_dir,
-                    channel="chromium",
-                    headless=False,
-                    args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
-                )
-                page = browser.pages[0]
                 self.page = page
                 self._safe_goto(page, "https://www.deepl.com/translator#auto/id", wait_extra=True)
 
@@ -1953,15 +2255,8 @@ class NoTrackBrowserWorker(threading.Thread):
                 subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
             except Exception as e:
                 logger.error(f"NoTrack Instance {self.instance_id}: Failed to run playwright install chromium: {e}")
-            with sync_playwright() as p:
+            with _browser_session(self.profile_dir, "https://notrack.ai/chat", f"NoTrack Instance {self.instance_id}") as (browser, page):
                 logger.info(f"NoTrack Instance {self.instance_id}: Launching Browser...")
-                browser = p.chromium.launch_persistent_context(
-                    user_data_dir=self.profile_dir,
-                    channel="chromium",
-                    headless=False,
-                    args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"]
-                )
-                page = browser.pages[0]
                 self.page = page
                 self._safe_goto(page, "https://notrack.ai/chat", wait_extra=True)
 
@@ -2323,7 +2618,7 @@ class NoTrackBrowserWorker(threading.Thread):
 @register_translator("Gemini Playwright")
 class TransGemini(BaseTranslator):
     """
-    Playwright browser automation translator supporting Gemini, DeepSeek, DeepL, and NoTrack.
+    Playwright browser automation translator supporting Gemini, DeepSeek, AI Studio, DeepL, and NoTrack.
     
     >>> t = TransGemini(lang_source="English", lang_target="Bahasa Indonesia", raise_unsupported_lang=False)
     >>> t.provider
@@ -2353,7 +2648,7 @@ class TransGemini(BaseTranslator):
     params: Dict = {
         "provider": {
             "type": "selector",
-            "options": ["Gemini", "DeepSeek", "DeepL", "NoTrack"],
+            "options": ["Gemini", "DeepSeek", "AI Studio", "DeepL", "NoTrack"],
             "value": "Gemini",
             "description": "Select the browser automation provider.",
         },
@@ -2365,7 +2660,7 @@ class TransGemini(BaseTranslator):
         },
         "prompt": {
             "value": "",
-            "description": "Custom prompt to guide LLM translation (Gemini, DeepSeek, NoTrack)."
+            "description": "Custom prompt to guide LLM translation (Gemini, DeepSeek, AI Studio, NoTrack)."
         },
         "timeout": {
             "value": 120,
@@ -2415,7 +2710,8 @@ class TransGemini(BaseTranslator):
 
     @property
     def profile_path(self) -> str:
-        return os.path.abspath(f"{self.provider.lower()}_profile_instance_{self.instance_id}")
+        slug = re.sub(r"[^a-z0-9]+", "", self.provider.lower())
+        return os.path.abspath(f"{slug}_profile_instance_{self.instance_id}")
 
     def _acquire_instance_id(self) -> int:
         """
@@ -2504,6 +2800,8 @@ class TransGemini(BaseTranslator):
             worker_provider = "Gemini"
             if "DeepSeek" in type(self.worker).__name__:
                 worker_provider = "DeepSeek"
+            elif "AIStudio" in type(self.worker).__name__:
+                worker_provider = "AI Studio"
             elif "DeepL" in type(self.worker).__name__:
                 worker_provider = "DeepL"
             elif "NoTrack" in type(self.worker).__name__:
@@ -2526,6 +2824,8 @@ class TransGemini(BaseTranslator):
 
         if active_provider == "DeepSeek":
             self.worker = DeepSeekBrowserWorker(self.profile_path, self.instance_id, repair_worker=self.repair_worker)
+        elif active_provider == "AI Studio":
+            self.worker = AIStudioBrowserWorker(self.profile_path, self.instance_id, repair_worker=self.repair_worker)
         elif active_provider == "DeepL":
             self.worker = DeepLBrowserWorker(self.profile_path, self.instance_id)
         elif active_provider == "NoTrack":
