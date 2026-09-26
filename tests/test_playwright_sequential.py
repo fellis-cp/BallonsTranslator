@@ -5,6 +5,7 @@ import time
 from ballontranslator.modules.translators.trans_playwrigt import (
     TranslationTask,
     TransGemini,
+    GeminiBrowserWorker,
     AIStudioBrowserWorker,
     _extract_json_block,
     _parse_or_repair_json,
@@ -49,6 +50,57 @@ class TestPlaywrightSequential(unittest.TestCase):
             "https://aistudio.google.com/prompts/new_chat?model=gemini-flash-lite-latest",
         )
         self.assertFalse(AIStudioBrowserWorker.SEND_WITH_ENTER)
+
+    def test_response_lookup_prefers_token_over_trailing_dom_node(self):
+        class Response:
+            def __init__(self, text):
+                self.text = text
+
+            def inner_text(self):
+                return self.text
+
+        class Page:
+            def query_selector_all(self, _selector):
+                return [
+                    Response("older answer"),
+                    Response('{"batch_id":"BTCH_new","translations":[]}'),
+                    Response("Copy response"),
+                ]
+
+        worker = GeminiBrowserWorker("/tmp/profile", 1)
+        response = worker._current_response_text(Page(), ["older answer"], "BTCH_new")
+        self.assertIn("BTCH_new", response)
+
+    def test_batch_accepts_new_valid_json_without_echoed_token(self):
+        class Response:
+            def __init__(self, text):
+                self.text = text
+
+            def inner_text(self):
+                return self.text
+
+        class Page:
+            sent = False
+
+            def wait_for_selector(self, _selector, timeout):
+                return None
+
+            def query_selector_all(self, _selector):
+                old = Response("older answer")
+                if not self.sent:
+                    return [old]
+                return [
+                    old,
+                    Response('{"translations":[{"id":1,"translation":"Halo"}]}'),
+                    Response("Copy response"),
+                ]
+
+        page = Page()
+        worker = GeminiBrowserWorker("/tmp/profile", 1)
+        worker._send_text_to_chat = lambda *_args, **_kwargs: setattr(page, "sent", True) or True
+        task = TranslationTask(["Hello"], "Indonesian", "", "English", timeout=1)
+
+        self.assertEqual(worker._do_translate_batch(page, task), ["Halo"])
 
     def test_single_item_json_parsing(self):
         item_id = 1
@@ -150,6 +202,21 @@ class TestPlaywrightSequential(unittest.TestCase):
         self.assertEqual(DeepLBrowserWorker._map_lang_code("繁體中文"), "zh")
         self.assertEqual(DeepLBrowserWorker._map_lang_code("Bahasa Indonesia"), "id")
         self.assertEqual(DeepLBrowserWorker._map_lang_code("auto"), "auto")
+
+    def test_json_repair_reversed_key_order(self):
+        raw = '[{"translation": "He said \\"hello\\"", "id": 1}, {"translation": "world", "id": 2}]'
+        res = _parse_or_repair_json(raw, instance_id=1)
+        self.assertIsNotNone(res)
+        self.assertEqual(len(res["translations"]), 2)
+        self.assertEqual(res["translations"][0]["id"], 1)
+        self.assertEqual(res["translations"][0]["translation"], 'He said "hello"')
+        self.assertEqual(res["translations"][1]["id"], 2)
+        self.assertEqual(res["translations"][1]["translation"], 'world')
+
+    def test_extract_json_block_quotes_and_braces(self):
+        text = "Leading text {'id': 1, 'text': 'nested { braces } here'} trailing text"
+        extracted = _extract_json_block(text)
+        self.assertEqual(extracted, "{'id': 1, 'text': 'nested { braces } here'}")
 
 if __name__ == '__main__':
     unittest.main()
