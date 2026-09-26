@@ -12,7 +12,7 @@ import tempfile
 import atexit
 import subprocess
 from contextlib import ExitStack, contextmanager
-from typing import List, Dict, Optional, Callable, Set, Any
+from typing import List, Dict, Optional, Callable, Set, Any, Tuple
 from playwright.sync_api import sync_playwright
 from .base import BaseTranslator, register_translator
 from ..exceptions import LLMRequestStopped
@@ -166,7 +166,7 @@ def _enter_sb_uc_cdp(stack: ExitStack, profile_dir: str, start_url: str, log_pre
 
     sb_kwargs: Dict[str, Any] = dict(uc=True, headless=False, user_data_dir=profile_dir)
     if sys.platform.startswith("linux"):
-        sb_kwargs["chromium_arg"] = "--ozone-platform=x11"
+        sb_kwargs["chromium_arg"] = "--enable-features=UseOzonePlatform,--ozone-platform-hint=auto"
 
     # SeleniumBase must be up *before* sync_playwright() starts: get_endpoint_url()
     # patches asyncio (nest_asyncio) for the current thread.
@@ -184,17 +184,49 @@ def _enter_sb_uc_cdp(stack: ExitStack, profile_dir: str, start_url: str, log_pre
     return context, _pick_page(context)
 
 
+def _clean_stale_profile_locks(profile_dir: str) -> None:
+    """Remove stale Chrome lock files in *profile_dir* left by previous crashes."""
+    if not os.path.exists(profile_dir):
+        return
+    lock_names = ["SingletonLock", "SingletonCookie", "SingletonSocket"]
+    for name in lock_names:
+        p = os.path.join(profile_dir, name)
+        try:
+            if os.path.islink(p) or os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+
 def _enter_plain_playwright(stack: ExitStack, profile_dir: str) -> Tuple[Any, Any]:
-    """Original launch path (plain Playwright Chromium) used as a fallback."""
+    """Plain Playwright launch used as a fallback with automatic channel discovery."""
     p = stack.enter_context(sync_playwright())
-    context = p.chromium.launch_persistent_context(
-        user_data_dir=profile_dir,
-        channel="chromium",
-        headless=False,
-        args=["--disable-blink-features=AutomationControlled", "--ozone-platform=x11"],
-    )
+    args = ["--disable-blink-features=AutomationControlled"]
+    if sys.platform.startswith("linux"):
+        args.extend(["--enable-features=UseOzonePlatform", "--ozone-platform-hint=auto"])
+
+    context = None
+    # Try channel=chrome, channel=chromium, and finally bundled chromium
+    for ch in ["chrome", "chromium", None]:
+        try:
+            kwargs: Dict[str, Any] = dict(
+                user_data_dir=profile_dir,
+                headless=False,
+                args=args,
+            )
+            if ch:
+                kwargs["channel"] = ch
+            context = p.chromium.launch_persistent_context(**kwargs)
+            break
+        except Exception as e:
+            logger.debug(f"Playwright launch with channel={ch} failed: {e}")
+            continue
+
+    if context is None:
+        raise RuntimeError("Failed to launch Playwright browser with any channel.")
+
     stack.callback(_quiet_close, context)
-    return context, context.pages[0]
+    return context, context.pages[0] if context.pages else context.new_page()
 
 
 @contextmanager
@@ -206,6 +238,7 @@ def _browser_session(profile_dir: str, start_url: str, log_prefix: str = "Instan
     to start, cleans up and falls back to plain Playwright so translation still
     works. All resources are released on exit, including on exceptions.
     """
+    _clean_stale_profile_locks(profile_dir)
     stack = ExitStack()
     try:
         result = None
@@ -220,6 +253,7 @@ def _browser_session(profile_dir: str, start_url: str, log_prefix: str = "Instan
                                f"falling back to plain Playwright.")
             if result is None:
                 stack.close()  # tear down any half-started SB/Playwright
+                _clean_stale_profile_locks(profile_dir)
                 stack = ExitStack()
         if result is None:
             result = _enter_plain_playwright(stack, profile_dir)
@@ -309,6 +343,8 @@ def _normalize_translations(translations_raw: list) -> list:
     [{'id': 1, 'translation': 'hello'}]
     >>> _normalize_translations([{"1": "hello"}])
     [{'id': 1, 'translation': 'hello'}]
+    >>> _normalize_translations([{"id": 0, "translation": "first"}, {"id": 1, "translation": "second"}])
+    [{'id': 1, 'translation': 'first'}, {'id': 2, 'translation': 'second'}]
     """
     if not isinstance(translations_raw, list):
         return []
@@ -367,6 +403,13 @@ def _normalize_translations(translations_raw: list) -> list:
             normalized.append({"id": item_id if item_id is not None else idx, "translation": trans_text})
         else:
             normalized.append({"id": idx, "translation": str(item) if item is not None else ""})
+
+    # Detect 0-based indexing (e.g. IDs 0..N-1) and re-index to 1-based (1..N)
+    valid_ids = [item["id"] for item in normalized if isinstance(item.get("id"), int)]
+    if valid_ids and min(valid_ids) == 0 and (max(valid_ids) == len(normalized) - 1 or len(valid_ids) == len(normalized)):
+        for item in normalized:
+            if isinstance(item.get("id"), int):
+                item["id"] += 1
 
     return normalized
 
@@ -892,10 +935,15 @@ class BaseBrowserWorker(threading.Thread):
                 except Exception:
                     pass
 
-        # 2. Extract new candidates not present in initial responses
-        new_texts = [t for t in texts if t.strip() not in initial_strings]
+        # 2. Extract new candidates not present in initial responses and not containing previous batch tokens
+        new_texts = [
+            t for t in texts
+            if t.strip() and t.strip() not in initial_strings
+            and (not re.search(r'BTCH_[0-9a-fA-F]+', t) or (batch_token and batch_token in t))
+            and (not re.search(r'ID_\d+_[0-9a-fA-F]+', t) or (batch_token and batch_token in t))
+        ]
         if not new_texts:
-            new_texts = texts
+            return ""
 
         # 3. Prefer candidates containing valid JSON blocks (longest first)
         json_candidates = [t for t in new_texts if _extract_json_block(t) is not None]
@@ -1014,6 +1062,7 @@ class BaseBrowserWorker(threading.Thread):
 
             # Snapshot existing response texts before sending to detect new responses accurately
             initial_responses = self._extract_all_candidate_texts(page)
+            initial_strings: Set[str] = {t.strip() for t in initial_responses if t and t.strip()}
 
             sent = self._send_text_to_chat(page, input_sel, full_prompt, stop_event=task.stop_event)
             if not sent or (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
@@ -1040,16 +1089,27 @@ class BaseBrowserWorker(threading.Thread):
                 if not candidate_texts:
                     continue
 
-                if batch_token:
-                    matching_cands = [t for t in candidate_texts if batch_token in t]
-                    matching_cands.sort(key=len, reverse=True)
-                    other_cands = [t for t in candidate_texts if batch_token not in t]
-                    other_cands.sort(key=len, reverse=True)
-                    cands_to_check = matching_cands + other_cands
-                else:
-                    cands_to_check = sorted(candidate_texts, key=len, reverse=True)
+                valid_cands = []
+                for t in candidate_texts:
+                    if not t or not t.strip():
+                        continue
+                    if batch_token and batch_token in t:
+                        valid_cands.append(t)
+                    elif t.strip() not in initial_strings:
+                        # Exclude any candidate that contains an old batch token from previous turns
+                        if not re.search(r'BTCH_[0-9a-fA-F]+', t):
+                            valid_cands.append(t)
 
-                # Fast path across all candidate elements
+                if not valid_cands:
+                    continue
+
+                matching_cands = [t for t in valid_cands if batch_token and batch_token in t]
+                other_cands = [t for t in valid_cands if not (batch_token and batch_token in t)]
+                matching_cands.sort(key=len, reverse=True)
+                other_cands.sort(key=len, reverse=True)
+                cands_to_check = matching_cands + other_cands
+
+                # Fast path across current turn's candidate elements
                 for cand in cands_to_check:
                     raw_json = _extract_json_block(cand)
                     if raw_json:
@@ -1202,6 +1262,9 @@ class BaseBrowserWorker(threading.Thread):
 
                 logger.info(f"{self.LOG_PREFIX} {self.instance_id}: [ITEM {item_id}/{len(input_elements)}] Token: {item_token}")
 
+                initial_responses = self._extract_all_candidate_texts(page)
+                initial_strings: Set[str] = {t.strip() for t in initial_responses if t and t.strip()}
+
                 sent = self._send_text_to_chat(page, input_sel, full_prompt, stop_event=task.stop_event)
                 if not sent or (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                     self._trigger_browser_stop()
@@ -1223,14 +1286,24 @@ class BaseBrowserWorker(threading.Thread):
                     if not candidate_texts:
                         continue
 
-                    if item_token:
-                        matching_cands = [t for t in candidate_texts if item_token in t]
-                        matching_cands.sort(key=len, reverse=True)
-                        other_cands = [t for t in candidate_texts if item_token not in t]
-                        other_cands.sort(key=len, reverse=True)
-                        cands_to_check = matching_cands + other_cands
-                    else:
-                        cands_to_check = sorted(candidate_texts, key=len, reverse=True)
+                    valid_cands = []
+                    for t in candidate_texts:
+                        if not t or not t.strip():
+                            continue
+                        if item_token and item_token in t:
+                            valid_cands.append(t)
+                        elif t.strip() not in initial_strings:
+                            if not re.search(r'ID_\d+_[0-9a-fA-F]+', t):
+                                valid_cands.append(t)
+
+                    if not valid_cands:
+                        continue
+
+                    matching_cands = [t for t in valid_cands if item_token and item_token in t]
+                    other_cands = [t for t in valid_cands if not (item_token and item_token in t)]
+                    matching_cands.sort(key=len, reverse=True)
+                    other_cands.sort(key=len, reverse=True)
+                    cands_to_check = matching_cands + other_cands
 
                     for cand in cands_to_check:
                         raw_json = _extract_json_block(cand)
@@ -1614,17 +1687,7 @@ class DeepSeekBrowserWorker(BaseBrowserWorker):
                     self._trigger_browser_stop()
                     return None
 
-                initial_responses = []
-                try:
-                    for el in (page.query_selector_all(self.RESPONSE_SEL) or []):
-                        try:
-                            t = el.inner_text()
-                            if t:
-                                initial_responses.append(t)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                initial_responses = self._extract_all_candidate_texts(page)
 
                 batch_token = f"BTCH_{uuid.uuid4().hex[:6]}"
 
@@ -1878,15 +1941,20 @@ class DeepLBrowserWorker(BaseBrowserWorker):
             page.keyboard.press("Backspace")
 
             # Wait for target input to clear
+            initial_target_text = ""
             start_clear = time.time()
             while time.time() - start_clear < 3:
                 if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                     self._trigger_browser_stop()
                     return None
                 try:
-                    target_text = page.query_selector(self.OUTPUT_SEL).inner_text().strip()
-                    if not target_text:
-                        break
+                    target_el = page.query_selector(self.OUTPUT_SEL)
+                    if target_el:
+                        t = target_el.inner_text().strip()
+                        if not t:
+                            initial_target_text = ""
+                            break
+                        initial_target_text = t
                 except Exception:
                     pass
                 time.sleep(0.1)
@@ -1917,23 +1985,29 @@ class DeepLBrowserWorker(BaseBrowserWorker):
                 except Exception:
                     continue
 
+                if not current_text or current_text == joined_input or (initial_target_text and current_text == initial_target_text):
+                    continue
+
                 if len(current_text) > last_length:
                     last_length = len(current_text)
                     stable_checks = 0
                     continue
 
-                if current_text and current_text != joined_input:
-                    stable_checks += 1
-                    if stable_checks >= 2:
-                        paragraphs = current_text.split("\n\n")
-                        if len(paragraphs) != len(input_elements):
-                            paragraphs = current_text.split("\n")
+                stable_checks += 1
+                if stable_checks >= 2:
+                    paragraphs = current_text.split("\n\n")
+                    if len(paragraphs) != len(input_elements):
+                        paragraphs = current_text.split("\n")
+                    if len(paragraphs) != len(input_elements):
+                        non_empty = [p.strip() for p in paragraphs if p.strip()]
+                        if len(non_empty) == len(input_elements):
+                            paragraphs = non_empty
 
-                        translations = []
-                        for i, elem in enumerate(input_elements):
-                            trans_p = paragraphs[i].strip() if i < len(paragraphs) else elem["text"]
-                            translations.append({"id": elem["id"], "translation": trans_p})
-                        return _build_results(task.src_list, translations)
+                    translations = []
+                    for i, elem in enumerate(input_elements):
+                        trans_p = paragraphs[i].strip() if i < len(paragraphs) else elem["text"]
+                        translations.append({"id": elem["id"], "translation": trans_p})
+                    return _build_results(task.src_list, translations)
 
             logger.warning(f"{self.LOG_PREFIX} {self.instance_id}: [TIMEOUT] No translation in {max_poll_time}s")
             return None
@@ -1984,15 +2058,20 @@ class DeepLBrowserWorker(BaseBrowserWorker):
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
 
+                initial_target_text = ""
                 start_clear = time.time()
                 while time.time() - start_clear < 2:
                     if (task.stop_event and task.stop_event.is_set()) or self.cancel_requested:
                         self._trigger_browser_stop()
                         return None
                     try:
-                        target_text = page.query_selector(self.OUTPUT_SEL).inner_text().strip()
-                        if not target_text:
-                            break
+                        target_el = page.query_selector(self.OUTPUT_SEL)
+                        if target_el:
+                            target_text = target_el.inner_text().strip()
+                            if not target_text:
+                                initial_target_text = ""
+                                break
+                            initial_target_text = target_text
                     except Exception:
                         pass
                     time.sleep(0.1)
@@ -2021,16 +2100,18 @@ class DeepLBrowserWorker(BaseBrowserWorker):
                     except Exception:
                         continue
 
+                    if not current_text or current_text == src or (initial_target_text and current_text == initial_target_text):
+                        continue
+
                     if len(current_text) > last_length:
                         last_length = len(current_text)
                         stable_checks = 0
                         continue
 
-                    if current_text and current_text != src:
-                        stable_checks += 1
-                        if stable_checks >= 2:
-                            item_translated = current_text
-                            break
+                    stable_checks += 1
+                    if stable_checks >= 2:
+                        item_translated = current_text
+                        break
 
                 collected_translations.append({
                     "id": item_id,
@@ -2211,18 +2292,20 @@ class TransGemini(BaseTranslator):
         except Exception:
             pass
 
+    MAX_INSTANCES: int = 16
+
     def _acquire_instance_id(self) -> int:
         """
-        Atomically acquire a lock slot (1-3) using flock / atomic creation
+        Atomically acquire a lock slot (1-16) using flock / atomic creation
         to prevent races between concurrent processes and handle same-process reuse.
 
         >>> t = TransGemini(lang_source="English", lang_target="Bahasa Indonesia", raise_unsupported_lang=False)
-        >>> t.instance_id in (1, 2, 3)
+        >>> 1 <= t.instance_id <= TransGemini.MAX_INSTANCES
         True
         >>> t.release_instance_id()
         """
         # Clean up legacy lock file in working directory if it exists
-        for i in range(1, 4):
+        for i in range(1, self.MAX_INSTANCES + 1):
             legacy_file = f"instance_{i}.lock"
             if os.path.exists(legacy_file):
                 try:
@@ -2231,7 +2314,7 @@ class TransGemini(BaseTranslator):
                     pass
 
         with self._INSTANCE_LOCK:
-            for i in range(1, 4):
+            for i in range(1, self.MAX_INSTANCES + 1):
                 if i in self._ACTIVE_INSTANCES:
                     continue
 
@@ -2284,7 +2367,7 @@ class TransGemini(BaseTranslator):
                         continue
 
             raise RuntimeError(
-                "All browser profile instances (1-3) are already in use. "
+                f"All browser profile instances (1-{self.MAX_INSTANCES}) are already in use. "
                 "Close another Playwright translator instance before starting a new one."
             )
 
