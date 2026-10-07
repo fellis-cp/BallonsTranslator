@@ -1,4 +1,4 @@
-from qtpy.QtCore import Signal, Qt, QPointF, QSize, QLineF, QDateTime, QRectF, QPoint
+from qtpy.QtCore import Signal, Qt, QPointF, QSize, QLineF, QRectF, QPoint
 from qtpy.QtGui import QPen, QColor, QCursor, QPainter, QPixmap, QBrush, QFontMetrics, QImage
 try:
     from qtpy.QtWidgets import QUndoCommand
@@ -6,6 +6,7 @@ except:
     from qtpy.QtGui import QUndoCommand
 
 from typing import Union, Tuple, List
+from uuid import uuid4
 import numpy as np
 from ballontranslator.utils.logger import logger
 
@@ -15,27 +16,28 @@ from .text_engine.editing.widgets import TransPairWidget
 
 
 class StrokeItemUndoCommand(QUndoCommand):
-    def __init__(self, target_layer: DrawingLayer, rect: Tuple[int], qimg: QImage, erasing=False):
+    def __init__(
+        self, target_layer: DrawingLayer, rect: tuple[int, int, int, int],
+        qimg: QImage, erasing: bool = False,
+    ) -> None:
         super().__init__()
         self.qimg = qimg
         self.x = rect[0]
         self.y = rect[1]
         self.target_layer = target_layer
-        self.key = str(QDateTime.currentMSecsSinceEpoch())
+        self.key = uuid4().hex
         if erasing:
             self.compose_mode = QPainter.CompositionMode.CompositionMode_DestinationOut
         else:
             self.compose_mode = QPainter.CompositionMode.CompositionMode_SourceOver
         
-    def undo(self):
+    def undo(self) -> None:
         if self.qimg is not None:
             self.target_layer.removeQImage(self.key)
-            self.target_layer.update()
 
-    def redo(self):
+    def redo(self) -> None:
         if self.qimg is not None:
             self.target_layer.addQImage(self.x, self.y, self.qimg, self.compose_mode, self.key)
-            self.target_layer.scene().update()
 
 
 class InpaintUndoCommand(QUndoCommand):
@@ -76,19 +78,9 @@ class InpaintUndoCommand(QUndoCommand):
         self.canvas.updateLayers()
 
 
-class EmptyCommand(QUndoCommand):
-    def __init__(self, parent=None):
-        super().__init__(parent=parent)
-    
-
 class RunBlkTransCommand(QUndoCommand):
-    def __init__(self, canvas: Canvas, blkitems: List[TextBlkItem], transpairw_list: List[TransPairWidget],  mode: int):
+    def __init__(self, canvas: Canvas, blkitems: List[TextBlkItem], transpairw_list: List[TransPairWidget], mode: int) -> None:
         super().__init__()
-
-        self.empty_command = None
-        if mode > 1:
-            self.empty_command = EmptyCommand()
-            canvas.push_draw_command(self.empty_command)
 
         self.op_counter = -1
         self.blkitems = blkitems
@@ -137,10 +129,10 @@ class RunBlkTransCommand(QUndoCommand):
 
     def redo(self) -> None:
 
-        if self.empty_command is not None:
-            self.empty_command.redo()
-
         if self.mode > 1 and self.num_inpainted > 0:
+            # This text-history command owns the pixels. A separate drawing
+            # command can be deleted independently and cannot track replay.
+            self.canvas.draw_undo_stack.resetClean()
             img_array = self.canvas.imgtrans_proj.inpainted_array
             mask_array = self.canvas.imgtrans_proj.mask_array
             for inpaint_rect, redo_img, redo_mask in zip(self.inpaint_rect_lst, self.redo_img_list, self.redo_mask_list):
@@ -166,10 +158,8 @@ class RunBlkTransCommand(QUndoCommand):
 
     def undo(self) -> None:
 
-        if self.empty_command is not None:
-            self.empty_command.undo()
-
         if self.mode > 1 and self.num_inpainted > 0:
+            self.canvas.draw_undo_stack.resetClean()
             img_array = self.canvas.imgtrans_proj.inpainted_array
             mask_array = self.canvas.imgtrans_proj.mask_array
             for inpaint_rect, undo_img, undo_mask in zip(self.inpaint_rect_lst, self.undo_img_list, self.undo_mask_list):

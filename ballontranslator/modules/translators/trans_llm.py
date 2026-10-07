@@ -1,9 +1,12 @@
 from dataclasses import replace
 import traceback
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union, TYPE_CHECKING
 
 import cv2
 import numpy as np
+
+if TYPE_CHECKING:
+    from ..codex import CodexTurnState
 
 from ..context.errors import (
     ContextLengthError,
@@ -21,11 +24,13 @@ from ..context.history import (
     HistoryPage,
     HistoryWindow,
     HistoryWindowKey,
+    RenderedHistoryPage,
     eligible_history_for_request,
     window_rebuild_reason,
 )
 from ..context.token_usage import (
     format_completion_token_usage,
+    format_prompt_cache_diagnostics,
     messages_token_count,
 )
 from ..context.translation_context import (
@@ -46,6 +51,7 @@ from ..llm_chat import (
     LLMChatResult,
     LLMChatRequester,
     LLMChatRequestError,
+    gpt_model_version,
     openai_chat_completion_args,
     openai_json_response_format,
 )
@@ -59,6 +65,7 @@ from .llm_translation_contract import (
     render_history_page,
     render_user_prompt,
     translation_json_schema,
+    translation_cache_messages,
     translation_system_prompt,
 )
 from ballontranslator.modules.exceptions import (
@@ -91,9 +98,13 @@ MAX_PAGE_LONG_SIDE = 1536
 PAGE_IMAGE_JPEG_QUALITY = 85
 
 
+def _uses_explicit_cache(profile: LLMProfile) -> bool:
+    return profile.backend == 'openai' and (gpt_model_version(profile.model) or (0, 0)) >= (5, 6)
+
+
 @register_translator("LLMTranslator")
 class LLMTranslator(LLMChatRequester, BaseTranslator):
-    """Profile-backed OpenAI-compatible translator.
+    """Profile-backed translator using API chat or Codex Responses.
 
     Example:
         >>> parse_translation_response(
@@ -131,7 +142,7 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         "proxy": {
             "value": "",
             "display_name": "Proxy",
-            "description": "Proxy address used for the OpenAI-compatible client.",
+            "description": "Proxy address used for LLM requests.",
         },
     }
 
@@ -161,6 +172,7 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         self.lang_map['Hindi'] = 'Hindi'
 
         self._history_window: Optional[HistoryWindow] = None
+        self._translation_codex_response: Optional[LLMChatResult] = None
         self._pending_visual_summaries: Dict[
             str,
             Tuple[
@@ -204,23 +216,35 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
             if profile.json_schema_response_format
             else 'json_object'
         )
+        output_limit = (
+            '' if profile.backend == 'codex'
+            else f'max_output_tokens={profile.max_tokens!r}, '
+        )
+        cache_mode = 'explicit' if _uses_explicit_cache(profile) else 'implicit'
+        transport = (
+            f"transport={'websocket' if self._codex_websocket_enabled() else 'sse'!r}, "
+            if profile.backend == 'codex' else ''
+        )
         return (
             'LLM translation run: '
             f'profile_id={str(profile.id)!r}, '
             f'profile_name={str(profile.name)!r}, model={model!r}, '
+            f'{transport}'
             f'context={str(pcfg.module.llm_translate_context)!r}, '
             f'history_budget={int(pcfg.module.llm_prior_context_token_budget)}, '
             f'vision={vision_enabled}, '
             f'summary_memory={summary_memory_enabled}, '
             f'overwrite_summary={overwrite_summary}, '
-            f'max_output_tokens={profile.max_tokens!r}, '
+            f'{output_limit}'
             f'thinking_setting='
             f'{str(profile.thinking_level or THINKING_AUTO)!r}, '
-            f'response_format={response_format!r}'
+            f'response_format={response_format!r}, '
+            f'prompt_cache={cache_mode!r}'
         )
 
     def unload_model(self, empty_cache=False):
         self._history_window = None
+        self._translation_codex_response = None
         getattr(self, '_pending_visual_summaries', {}).clear()
         return super().unload_model(empty_cache=empty_cache)
 
@@ -355,9 +379,14 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         )
         if empty_page_summary and not request_summary:
             return []
+        if pcfg.module.translator_llm_id == 'codex':
+            from ..codex import account
+            account.require_sign_in(self.stop_event)
         if not self.all_model_loaded():
             self.load_model()
         profile = self.profile
+        model = self._text_model(profile)
+        array_response = profile.backend == 'codex' or gpt_model_version(model) is not None
         target_language_name = self._translated_lang(target_language)
         prompt_spec = TranslationPromptSpec(
             source_language=self._translated_lang(source_language),
@@ -367,9 +396,11 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                 target_language_name,
                 history_enabled=history_enabled,
                 summary_enabled=request_summary,
+                array_response=array_response,
             ),
             summary_enabled=request_summary,
             history_enabled=history_enabled,
+            array_response=array_response,
         )
         vision_request = None
         if (
@@ -382,7 +413,6 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                 str(page_key),
                 profile,
             )
-        model = self._text_model(profile)
         request_context = self._snapshot_request_context(
             project,
             page_key,
@@ -575,7 +605,7 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         True
         """
         use_history = prompt_spec.history_enabled
-        summary_enabled = prompt_spec.summary_enabled
+        # Saved context remains available even when this request needs no new summary.
         memory_record = (
             project.get_llm_compact_memory()
             if memory_enabled and project is not None
@@ -669,15 +699,46 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                 str(page_key),
                 window_key,
             )
+            # The current translation run owns its original replies. Postprocessing
+            # and scene layout may rewrite saved translations between requests.
+            # Reuse the existing bounded window, scoped by the pipeline stop event.
+            run_pages: Dict[str, RenderedHistoryPage] = {}
+            if (
+                self.stop_event is not None
+                and self._history_window is not None
+                and self._history_window.key.load_identity is window_key.load_identity
+            ):
+                candidates = self._history_window.history
+                if self._history_window.last_response is not None:
+                    candidates += (self._history_window.last_response,)
+                run_pages = {
+                    page.page_key: page for page in candidates
+                    if page.response_run is self.stop_event
+                }
+
+            def render_page(page: HistoryPage) -> RenderedHistoryPage:
+                original = run_pages.get(page.page_key)
+                if (original is not None and original.snapshot == page
+                        and self._history_window.key == window_key):
+                    return original
+                rendered = render_history_page(page, model, prompt_spec)
+                if original is not None and original.snapshot.sources == page.sources:
+                    # Summary edits need fresh messages, but the translation text
+                    # still belongs to the original response from this run.
+                    rendered = replace(rendered, response_run=original.response_run)
+                return rendered
+
             previous_page = None
             if rebuild_reason is None:
-                # Re-snapshot retained pages so edits cannot leak through cached messages.
+                # Recheck eligibility, sources and summaries; same-run translations
+                # come from the original responses rather than the displayed text.
                 fresh_retained = tuple(
                     self._snapshot_history_page(
                         project,
                         page.page_key,
                         target_language,
-                        summary_enabled=summary_enabled,
+                        summary_enabled=memory_enabled,
+                        run_page=run_pages.get(page.page_key),
                     )
                     for page in self._history_window.history
                 )
@@ -695,7 +756,8 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                         project,
                         self._history_window.request_page_key,
                         target_language,
-                        summary_enabled=summary_enabled,
+                        summary_enabled=memory_enabled,
+                        run_page=run_pages.get(self._history_window.request_page_key),
                     )
                     if previous_page is None:
                         rebuild_reason = ContextReason.PREVIOUS_INCOMPLETE
@@ -710,26 +772,23 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                     project,
                     candidate_key,
                     target_language,
-                    summary_enabled=summary_enabled,
+                    summary_enabled=memory_enabled,
+                    run_page=run_pages.get(candidate_key),
                 ),
-                render_page=lambda page: render_history_page(
-                    page,
-                    model,
-                    prompt_spec,
-                ),
+                render_page=render_page,
                 reserved_tokens=current_summary_tokens,
             )
 
         missing_history_summaries = tuple(
             page.page_key
             for page in history
-            if summary_enabled and not page.snapshot.summary
+            if memory_enabled and not page.snapshot.summary
         )
         if missing_history_summaries:
             self.logger.debug(
                 'LLM history summary policy: '
                 f'pages_without_summary={missing_history_summaries!r}; '
-                'their assistant examples contain an empty page_summary.'
+                'no saved page summary is available.'
             )
 
         # Retired summaries stay saved, but must not refill the prompt after
@@ -919,8 +978,12 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         target_language: str,
         *,
         summary_enabled: bool = False,
+        run_page: Optional[RenderedHistoryPage] = None,
     ) -> Optional[HistoryPage]:
         """Copy one eligible page without retaining its mutable text blocks.
+
+        A same-run response supplies its original translations while the project
+        still owns eligibility, sources and saved summaries.
 
         >>> LLMTranslator.__new__(LLMTranslator)._snapshot_history_page(
         ...     None, '001.png', 'English') is None
@@ -940,30 +1003,28 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         ):
             return None
 
-        blocks = project.pages[page_key]
-        translations = []
-        for block in blocks:
-            source = block.get_text()
-            if not source or not source.strip():
-                continue
-            translation = getattr(block, 'translation', '')
-            if not translation or not str(translation).strip():
-                # Page chunks are indivisible; never seed a partially translated page.
-                return None
-            translations.append(str(translation))
+        # Keep sources and translations on the same membership during UI saves.
+        blocks = project.pages[page_key][:]
+        non_empty_ids, sources, _ = BaseTranslator._prepare_textblock_sources(self, blocks)
+        sources = tuple(sources)
+        original_page = run_page.snapshot if run_page is not None else None
+        translations = (
+            original_page.translations
+            if original_page is not None and original_page.sources == sources
+            else tuple(str(getattr(blocks[index], 'translation', '') or '') for index in non_empty_ids)
+        )
+        if any(not translation.strip() for translation in translations):
+            # Page chunks are indivisible; never seed a partially translated page.
+            return None
         summary = (
             saved_page_summary_text(project, page_key) if summary_enabled else ''
         )
         if not translations and not summary:
             return None
-        _, sources, _ = BaseTranslator._prepare_textblock_sources(
-            self,
-            blocks,
-        )
         return HistoryPage(
             page_key=str(page_key),
-            sources=tuple(sources),
-            translations=tuple(translations),
+            sources=sources,
+            translations=translations,
             summary=summary,
         )
 
@@ -1003,12 +1064,16 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         # Compaction is always a text request, independently of Vision.
         api_args = self._api_args(profile, messages)
         api_args.pop('response_format')
+        request_kwargs = {}
+        if profile.backend == 'codex':
+            from ..codex import CodexTurnState
+            request_kwargs['codex_turn'] = CodexTurnState()
         attempts = max(1, int(self.get_param_value('retry attempts')))
         for attempt in range(1, attempts + 1):
             if self.stop_event is not None and self.stop_event.is_set():
                 raise LLMRequestStopped()
             try:
-                result = self.request_chat_completion(profile, api_args)
+                result = self.request_chat_completion(profile, api_args, **request_kwargs)
                 self._log_token_usage(result, page_key='memory-compaction')
                 memory_text = result.content.strip()
                 if not memory_text:
@@ -1066,11 +1131,20 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         summary_enabled: bool = False,
     ) -> Dict:
         model = self._text_model(profile)
+        gpt_version = gpt_model_version(model)
         api_args = {
             "model": model,
             "messages": messages,
         }
         api_args.update(openai_chat_completion_args(profile, model))
+        if _uses_explicit_cache(profile):
+            api_args['messages'] = translation_cache_messages(messages)
+            # The subscription endpoint rejects both public API cache controls;
+            # retain its implicit cache and original instruction mapping.
+            # extra_body carries the API fields through the installed SDK.
+            api_args.setdefault('extra_body', {})['prompt_cache_options'] = {
+                'mode': 'explicit', 'ttl': '30m',
+            }
         api_args["response_format"] = openai_json_response_format(
             profile,
             'translation_response',
@@ -1078,6 +1152,7 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                 translation_json_schema(
                     expected_translations,
                     summary_enabled=summary_enabled,
+                    array_response=profile.backend == 'codex' or gpt_version is not None,
                 )
                 if profile.json_schema_response_format
                 else {}
@@ -1102,6 +1177,10 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         attempt: Optional[int] = None,
     ) -> None:
         summary = format_completion_token_usage(completion)
+        diagnostics = format_prompt_cache_diagnostics(completion.prompt_cache_diagnostics)
+        summary = ', '.join(part for part in (
+            summary, f'prompt_cache_diagnostics={diagnostics}',
+        ) if part)
         finish_reason = str(completion.finish_reason or '').replace(
             '\r', ' '
         ).replace('\n', ' ')
@@ -1110,15 +1189,14 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                 part for part in (summary, f'finish_reason={finish_reason}')
                 if part
             )
-        if summary:
-            details = []
-            if page_key is not None:
-                safe_page_key = str(page_key).replace('\r', ' ').replace('\n', ' ')
-                details.append(f'page={safe_page_key or "-"}')
-            if attempt is not None:
-                details.append(f'attempt={attempt}')
-            details.append(summary)
-            self.logger.debug(f'LLM token usage: {", ".join(details)}')
+        details = []
+        if page_key is not None:
+            safe_page_key = str(page_key).replace('\r', ' ').replace('\n', ' ')
+            details.append(f'page={safe_page_key or "-"}')
+        if attempt is not None:
+            details.append(f'attempt={attempt}')
+        details.append(summary)
+        self.logger.debug(f'LLM token usage: {", ".join(details)}')
 
     def _request_translation(
         self,
@@ -1129,7 +1207,9 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         usage_page_key=None,
         usage_attempt: Optional[int] = None,
         summary_enabled: bool = False,
+        codex_turn: Optional['CodexTurnState'] = None,
     ) -> str:
+        request_kwargs = {'codex_turn': codex_turn} if codex_turn is not None else {}
         try:
             result = self.request_chat_completion(
                 profile,
@@ -1139,6 +1219,7 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                     expected_translations,
                     summary_enabled=summary_enabled,
                 ),
+                **request_kwargs,
             )
         except LLMChatRequestError as error:
             if is_context_length_error(error.provider_error):
@@ -1150,6 +1231,8 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
             page_key=usage_page_key,
             attempt=usage_attempt,
         )
+        if profile.backend == 'codex':
+            self._translation_codex_response = result
         return result.content
 
     def _translate(
@@ -1175,6 +1258,7 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
         []
         """
         queries = tuple(src_list)
+        response_run = self.stop_event
         if not queries and not (
             prompt_spec.summary_enabled and vision_request is not None
         ):
@@ -1192,6 +1276,7 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
             queries,
             prompt_spec=prompt_spec,
             request_context=request_context,
+            codex_replay=profile.backend == 'codex',
             image_part=(
                 vision_request.image_part()
                 if vision_request is not None
@@ -1215,6 +1300,10 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
             else 0
         )
         recovery_attempts = 0
+        codex_turn = None
+        if profile.backend == 'codex':
+            from ..codex import CodexTurnState
+            codex_turn = CodexTurnState()
         while True:
             if self.stop_event is not None and self.stop_event.is_set():
                 raise LLMRequestStopped()
@@ -1227,15 +1316,21 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                 }
                 if summary_enabled:
                     request_kwargs['summary_enabled'] = summary_enabled
+                if codex_turn is not None:
+                    request_kwargs['codex_turn'] = codex_turn
+                self._translation_codex_response = None
                 raw_response = self._request_translation(
                     profile,
                     messages,
                     **request_kwargs,
                 )
+                codex_response = self._translation_codex_response
+                self._translation_codex_response = None
                 try:
                     parsed = parse_translation_response(
                         raw_response,
                         len(queries),
+                        array_response=prompt_spec.array_response,
                     )
                 except Exception:
                     safe_page_key = str(usage_page_key or '-').replace(
@@ -1272,6 +1367,7 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                     queries,
                     prompt_spec=prompt_spec,
                     request_context=active_context,
+                    codex_replay=profile.backend == 'codex',
                     image_part=(
                         vision_request.image_part()
                         if vision_request is not None
@@ -1332,6 +1428,18 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
             and successful_context.window_key is not None
             and successful_context.request_page_key is not None
         ):
+            last_response = None
+            if response_run is not None:
+                # Original text owns history within this run; project completion,
+                # sources and summaries are still validated on the next request.
+                last_response = replace(
+                    render_history_page(HistoryPage(
+                        successful_context.request_page_key, queries, parsed.translations,
+                        parsed.page_summary if summary_enabled else '',
+                    ), self._text_model(profile), prompt_spec),
+                    codex_response=codex_response,
+                    response_run=response_run,
+                )
             self._history_window = HistoryWindow(
                 key=successful_context.window_key,
                 request_page_key=successful_context.request_page_key,
@@ -1339,5 +1447,6 @@ class LLMTranslator(LLMChatRequester, BaseTranslator):
                 token_count=sum(
                     page.token_count for page in successful_context.history
                 ),
+                last_response=last_response,
             )
         return translations

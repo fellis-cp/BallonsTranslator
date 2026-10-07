@@ -9,6 +9,22 @@ class LLMUserActionRequiredError(Exception):
     """
 
 
+class CodexSignInRequiredError(LLMUserActionRequiredError):
+    """Require explicit ChatGPT sign-in without exposing provider diagnostics.
+
+    >>> CodexSignInRequiredError(invalid=True).invalid
+    True
+    """
+
+    def __init__(self, invalid: bool = False) -> None:
+        self.invalid = bool(invalid)
+        message = (
+            'Codex sign-in is invalid or expired. Sign in with ChatGPT again.'
+            if self.invalid else 'Sign in with ChatGPT to use Codex.'
+        )
+        super().__init__(message)
+
+
 class LLMApiKeyRequiredError(LLMUserActionRequiredError):
     """Raised when an LLM profile requires a key before a request can run.
 
@@ -22,6 +38,22 @@ class LLMApiKeyRequiredError(LLMUserActionRequiredError):
         self.profile_id = profile_id
         self.profile_name = profile_name or profile_id
         super().__init__(f'API key is required for LLM profile "{self.profile_name}".')
+
+
+class LLMAuthenticationError(LLMUserActionRequiredError):
+    """Report rejected request credentials without opening the missing-key dialog.
+
+    >>> isinstance(LLMAuthenticationError('openai'), LLMApiKeyRequiredError)
+    False
+    """
+
+    def __init__(self, profile_id: str, profile_name: str = '') -> None:
+        self.profile_id = profile_id
+        self.profile_name = profile_name or profile_id
+        super().__init__(
+            f'Authentication failed for LLM profile "{self.profile_name}". '
+            'The provider rejected the request credentials. Check the API key and endpoint.'
+        )
 
 
 class LLMModelRequiredError(LLMUserActionRequiredError):

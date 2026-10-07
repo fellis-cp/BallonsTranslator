@@ -7,11 +7,11 @@ import numpy as np
 
 from ballontranslator.modules.ocr.ocr_llm import LLMOCR
 from ballontranslator.modules.exceptions import (
-    LLMApiKeyRequiredError,
+    LLMAuthenticationError,
     LLMModelRequiredError,
 )
 from ballontranslator.utils.config import pcfg
-from ballontranslator.utils.llm_profiles import DEFAULT_OCR_PROMPT, default_profile
+from ballontranslator.utils.llm_profiles import DEFAULT_OCR_PROMPT, default_codex_profile, default_profile
 from ballontranslator.utils.textblock import TextBlock
 
 
@@ -63,7 +63,7 @@ class FakeOCR(LLMOCR):
 
 
 class LLMOCRTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self._old_profiles = copy.deepcopy(pcfg.module.llm_profiles)
         self._old_ocr_llm_id = pcfg.module.ocr_llm_id
         self._old_page_settings = (
@@ -73,7 +73,10 @@ class LLMOCRTest(unittest.TestCase):
         )
         profile = default_profile('OpenAI')
         profile.api_key = 'sk-demo'
+        profile.model = 'test-text-model'
+        profile.model_options = [profile.model]
         profile.vision_model = 'gpt-4o'
+        profile.vision_model_options = [profile.vision_model]
         profile.vision_detail_level = 'auto'
         profile.vision_prompt = 'Read vertical text carefully.'
         pcfg.module.llm_profiles = [profile]
@@ -119,28 +122,29 @@ class LLMOCRTest(unittest.TestCase):
         self.assertNotIn(DEFAULT_OCR_PROMPT, builtin_prompt)
         self.assertNotIn('"order"', builtin_prompt)
 
-    def test_vision_enabled_profile_requires_model(self):
-        profile = default_profile('OpenAI')
-        profile.api_key = 'sk-demo'
-        profile.model = ''
-        profile.vision_model = ''
-        pcfg.module.llm_profiles = [profile]
-        pcfg.module.ocr_llm_id = profile.id
+    def test_vision_enabled_profile_requires_model(self) -> None:
+        for profile in (default_profile('OpenAI'), default_codex_profile()):
+            with self.subTest(backend=profile.backend):
+                profile.model = ''
+                profile.vision_model = ''
+                pcfg.module.llm_profiles = [profile]
+                pcfg.module.ocr_llm_id = profile.id
 
-        with self.assertRaises(LLMModelRequiredError):
-            _ = self.ocr.profile
-        with self.assertRaises(LLMModelRequiredError):
-            self.ocr._api_args(profile, [{'role': 'user', 'content': 'x'}])
+                with self.assertRaises(LLMModelRequiredError):
+                    _ = self.ocr.profile
+                with self.assertRaises(LLMModelRequiredError):
+                    self.ocr._api_args(profile, [{'role': 'user', 'content': 'x'}])
 
-        profile.vision_model = 'stale-vision-model'
-        profile.vision_model_options = []
-        with self.assertRaises(LLMModelRequiredError):
-            _ = self.ocr.profile
-        with self.assertRaises(LLMModelRequiredError):
-            self.ocr._api_args(profile, [{'role': 'user', 'content': 'x'}])
+                profile.vision_model = 'stale-vision-model'
+                profile.vision_model_options = []
+                with self.assertRaises(LLMModelRequiredError):
+                    _ = self.ocr.profile
+                with self.assertRaises(LLMModelRequiredError):
+                    self.ocr._api_args(profile, [{'role': 'user', 'content': 'x'}])
 
     def test_profile_rejects_a_non_vision_capability(self):
         profile = default_profile('DeepSeek')
+        profile.support_vision = False
         pcfg.module.llm_profiles = [profile]
         pcfg.module.ocr_llm_id = profile.id
 
@@ -278,7 +282,7 @@ class LLMOCRTest(unittest.TestCase):
         block = TextBlock(xyxy=[0, 0, 2, 2], text=['original'])
         pcfg.module.ocr_llm_page_level = True
 
-        with self.assertRaises(LLMApiKeyRequiredError):
+        with self.assertRaises(LLMAuthenticationError):
             ocr.run_ocr(
                 np.zeros((2, 2, 3), dtype=np.uint8),
                 [block],
@@ -286,5 +290,6 @@ class LLMOCRTest(unittest.TestCase):
             )
 
         self.assertEqual(block.text, ['original'])
+        self.assertEqual(len(ocr.completions.calls), 1)
 if __name__ == '__main__':
     unittest.main()
