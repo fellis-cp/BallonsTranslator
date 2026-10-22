@@ -577,6 +577,7 @@ class MainWindow(mainwindow_cls):
 
         self.configPanel.setupConfig()
         self.configPanel.save_config.connect(self.save_config)
+        self.configPanel.restart_requested.connect(self.restart_signal.emit)
         self.configPanel.check_update.connect(self.check_for_updates)
         self.configPanel.reload_textstyle.connect(self.load_textstyle_from_proj_dir)
         self.configPanel.font_list_changed.connect(self.on_show_only_custom_font)
@@ -1622,6 +1623,10 @@ class MainWindow(mainwindow_cls):
             self.canvas.search_widget.hide()
         elif self.canvas.editing_textblkitem is not None and self.canvas.editing_textblkitem.isEditing():
             self.canvas.editing_textblkitem.endEdit()
+        else:
+            editor = self.app.focusWidget()
+            if isinstance(editor, SourceTextEdit):
+                editor.clearFocus()
 
     def setPaintMode(self):
         if self.bottomBar.paintChecker.isChecked():
