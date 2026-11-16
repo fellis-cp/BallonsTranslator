@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from qtpy.QtCore import QRectF
+from qtpy.QtGui import QTransform
 
 from ballontranslator.modules import TEXTDETECTORS
 from ballontranslator.modules.base import merge_config_module_params
@@ -20,6 +22,7 @@ from ballontranslator.modules.exceptions import ModuleRunError
 from ballontranslator.modules.textdetector import detector_koharu
 from ballontranslator.modules.textdetector.detector_koharu import KoharuDetector
 from ballontranslator.utils.io_utils import json_dump_nested_obj
+from ballontranslator.utils.bubble_shape import _text_mask_path, bubble_path
 from ballontranslator.utils.textblock import TextBlock
 
 
@@ -48,14 +51,19 @@ def text_strips(vertical: bool = False, angle: float = 0) -> np.ndarray:
     return (np.abs(inline) < 30) & (np.min(np.abs(block[..., None] - [-40, 0, 40]), axis=-1) < 2)
 
 
+def expected_cleanup(mask: np.ndarray, radius: int = 1) -> np.ndarray:
+    """Reference disk morphology without the production distance transforms."""
+    y, x = np.ogrid[-radius:radius+1, -radius:radius+1]
+    disk = (x*x + y*y <= radius*radius).astype(np.uint8)
+    return cv2.morphologyEx(cv2.dilate(mask, disk), cv2.MORPH_CLOSE, disk)
+
+
 class KoharuTests(unittest.TestCase):
     def setUp(self) -> None:
         self.log = patch.object(KoharuDetector.logger, 'info')
         self.log.start()
         self.addCleanup(self.log.stop)
-        self.detector = KoharuDetector(device='cpu', **{
-            'detect size': 768, 'mask postprocessing': 'dilate', 'mask dilate size': 0,
-        })
+        self.detector = KoharuDetector(device='cpu', **{'detect size': 768})
         self.output = prediction()
         self.detector.model = Mock(return_value=self.output)
         self.addCleanup(self.detector.unload_model)
@@ -74,7 +82,7 @@ class KoharuTests(unittest.TestCase):
         self.assertFalse(pixels.requires_grad)
         self.assertEqual({b.label for b in blocks}, {'text', 'onomatopoeia'})
         self.assertEqual(len(blocks), 2)
-        np.testing.assert_array_equal(mask, self.expected_mask(0) | self.expected_mask(1))
+        np.testing.assert_array_equal(mask, expected_cleanup(self.expected_mask(0) | self.expected_mask(1)))
         self.assertTrue(all(b.det_model == 'koharu' and b.font_size > 0 for b in blocks))
         for block in blocks:
             restored = TextBlock(**json.loads(json_dump_nested_obj(block.to_dict())))
@@ -98,7 +106,7 @@ class KoharuTests(unittest.TestCase):
             'pred_masks': torch.from_numpy(np.where(masks[None], 2., -2.)).float(),
         }
         mask, blocks = self.detector.detect(np.zeros((80, 120, 3), np.uint8))
-        np.testing.assert_array_equal(mask, np.maximum(masks[0], masks[1]) * 255)
+        np.testing.assert_array_equal(mask, expected_cleanup(np.maximum(masks[0], masks[1]) * 255))
         bubble_block = next(b for b in blocks if b.xyxy[0] < 50)
         self.assertIsNotNone(bubble_block.bubble_shape)
         self.assertTrue(bubble_block.bubble_layout)
@@ -127,7 +135,7 @@ class KoharuTests(unittest.TestCase):
         frames = sorted(block.bubble_shape.frame for block in blocks)
         self.assertTrue(all(block.bubble_layout for block in blocks))
         self.assertLessEqual(frames[0][0] + frames[0][2], frames[1][0] + 1)
-        np.testing.assert_array_equal(mask, np.maximum(masks[0], masks[1]) * 255)
+        np.testing.assert_array_equal(mask, expected_cleanup(np.maximum(masks[0], masks[1]) * 255))
 
     def test_disconnected_bubble_uses_the_component_containing_its_text(self) -> None:
         self.detector.num_select = 2
@@ -150,12 +158,80 @@ class KoharuTests(unittest.TestCase):
         self.assertLess(y, 25)
         self.assertGreater(y + height, 40)
 
+    def test_single_and_shared_bubbles_cover_only_their_box_clipped_text(self) -> None:
+        for shared in (False, True):
+            with self.subTest(shared=shared):
+                text_boxes = ([[.275, .5, .35, .9], [.725, .5, .35, .9]] if shared
+                              else [[.5, .5, .55, .92]])
+                count = len(text_boxes)
+                self.detector.num_select = count + 1
+                masks = np.zeros((count + 1, 120, 200), np.uint8)
+                if shared:
+                    masks[0, 40:80, 45:65] = masks[1, 40:80, 135:155] = 1
+                    masks[0, 8, 55] = 1
+                else:
+                    masks[0, 35:85, 75:125] = 1
+                    masks[0, 8, 100] = 1
+                expected_text = masks[:count].copy()
+                masks[:count, :3] = masks[:count, -3:] = 1
+                masks[:count, :, :5] = masks[:count, :, -5:] = 1
+                cv2.ellipse(masks[-1], (100, 60), (90, 45), 0, 0, 360, 1, -1)
+                logits = torch.full((1, count + 1, 5), -20.)
+                logits[0, :count, 0] = logits[0, count, 2] = 20
+                self.detector.model.return_value = {
+                    'pred_logits': logits,
+                    'pred_boxes': torch.tensor([text_boxes + [[.5, .5, .9, .75]]]),
+                    'pred_masks': torch.from_numpy(np.where(masks[None], 2., -2.)).float(),
+                }
+                mask, blocks = self.detector.detect(np.zeros((120, 200, 3), np.uint8))
+                np.testing.assert_array_equal(mask, expected_cleanup(masks[:count].max(axis=0) * 255))
+                self.assertEqual(len(blocks), count)
+                for block in blocks:
+                    self.assertTrue(block.bubble_layout)
+                    shape = block.bubble_shape
+                    path = bubble_path(shape.nodes, QRectF(*shape.frame))
+                    center = QRectF(*shape.frame).center()
+                    transform = QTransform().translate(center.x(), center.y()).rotate(block.angle)
+                    transform.translate(-center.x(), -center.y())
+                    index = int(shared and block.xyxy[0] > 100)
+                    required = _text_mask_path(expected_text[index]).translated(.5, .5)
+                    page_path = transform.map(path)
+                    self.assertTrue(required.subtracted(page_path).isEmpty())
+                    x1, y1, x2, y2 = block.xyxy
+                    self.assertFalse(page_path.contains(QRectF(x1, y1, x2 - x1, y2 - y1)))
+                    if shared:
+                        other = _text_mask_path(expected_text[1 - index]).translated(.5, .5)
+                        self.assertFalse(page_path.intersects(other))
+
+    def test_box_clipping_uses_native_coordinates_before_bubble_association(self) -> None:
+        # The 8x8 masks project onto an 80x40 page, with fractional native x bounds.
+        self.output['pred_masks'][0, 2] = -2
+        self.output['pred_masks'][0, 2, 1:7, :4] = 2
+        _, baseline = self.detector.detect(self.img)
+        original = next(b for b in baseline if b.label == 'text').bubble_shape
+        self.assertIsNotNone(original)
+        self.output['pred_masks'][0, 0] = 2
+        saved_masks = self.output['pred_masks'].clone()
+        mask, blocks = self.detector.detect(self.img)
+        block = next(b for b in blocks if b.label == 'text')
+        self.assertEqual(block.bubble_shape, original)
+        self.assertTrue(block.bubble_layout)
+        self.assertTrue(np.all(mask == 255))
+        torch.testing.assert_close(self.output['pred_masks'], saved_masks)
+        # An instance with foreground only outside its box has no layout constraint.
+        self.output['pred_masks'][0, 0] = -2
+        self.output['pred_masks'][0, 0, 0] = 2
+        _, blocks = self.detector.detect(self.img)
+        block = next(b for b in blocks if b.label == 'text')
+        self.assertIsNone(block.bubble_shape)
+        self.assertFalse(block.bubble_layout)
+
     def test_labels_filter_both_blocks_and_masks(self) -> None:
         for index, label in enumerate(('text', 'onomatopoeia')):
             self.detector.updateParam('label', {name: name == label for name in ('text', 'onomatopoeia')})
             mask, blocks = self.detector.detect(self.img)
             self.assertEqual([b.label for b in blocks], [label])
-            np.testing.assert_array_equal(mask, self.expected_mask(index))
+            np.testing.assert_array_equal(mask, expected_cleanup(self.expected_mask(index)))
         self.detector.updateParam('label', {'text': False, 'onomatopoeia': False})
         self.detector.model.reset_mock()
         mask, blocks = self.detector.detect(self.img)
@@ -167,7 +243,7 @@ class KoharuTests(unittest.TestCase):
         self.detector.updateParam('text threshold', 1)
         mask, blocks = self.detector.detect(self.img)
         self.assertEqual([b.label for b in blocks], ['onomatopoeia'])
-        np.testing.assert_array_equal(mask, self.expected_mask(1))
+        np.testing.assert_array_equal(mask, expected_cleanup(self.expected_mask(1)))
         self.detector.updateParam('onomatopoeia threshold', 1)
         mask, blocks = self.detector.detect(self.img)
         self.assertEqual(blocks, [])
@@ -180,37 +256,16 @@ class KoharuTests(unittest.TestCase):
         mask, blocks = self.detector.detect(self.img)
         self.assertEqual(blocks, [])
 
-    def test_disabling_types_drops_their_masks_after_every_cleanup_mode(self) -> None:
-        self.img[:] = 255
-        self.img[(self.expected_mask(0) | self.expected_mask(1)) > 0] = 0
-        self.detector.updateParam('mask dilate size', 2)
-        for mode in ('koharu', 'dilate', 'ctd'):
-            self.detector.updateParam('mask postprocessing', mode)
-            for text, sound_effects in ((True, True), (True, False), (False, True),
-                                        (False, False), (True, True)):
-                with self.subTest(mode=mode, text=text, sound_effects=sound_effects):
-                    enabled = {'text': text, 'onomatopoeia': sound_effects}
-                    self.detector.updateParam('label', enabled)
-                    mask, blocks = self.detector.detect(self.img)
-                    self.assertEqual({b.label for b in blocks}, {k for k, v in enabled.items() if v})
-                    self.assertEqual(bool(mask[:, :40].any()), text)
-                    self.assertEqual(bool(mask[:, 40:].any()), sound_effects)
-
-    def test_dilation_and_font_multiplier_apply_once(self) -> None:
-        _, original = self.detector.detect(self.img)
+    def test_font_multiplier_applies_once_without_changing_masks(self) -> None:
+        original_mask, original = self.detector.detect(self.img)
         self.detector.updateParam('font size multiplier', 1.5)
-        self.detector.updateParam('mask dilate size', 2)
         mask, blocks = self.detector.detect(self.img)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        np.testing.assert_array_equal(mask, cv2.dilate(self.expected_mask(0) | self.expected_mask(1), kernel))
+        np.testing.assert_array_equal(mask, original_mask)
         for before, after in zip(original, blocks):
             self.assertEqual(after.font_size, before.font_size * 1.5)
             self.assertEqual(after._detected_font_size, -1)
 
-    def test_default_cleanup_matches_disk_morphology_at_edges_and_overlaps(self) -> None:
-        detector = KoharuDetector(device='cpu')
-        detector.model = self.detector.model
-        self.addCleanup(detector.unload_model)
+    def test_cleanup_matches_disk_morphology_at_edges_and_overlaps(self) -> None:
         for shape, radius in [((40, 80), 1), ((100, 256), 2), ((100, 768), 5),
                               ((100, 1024), 6), ((200, 2048), 12)]:
             with self.subTest(shape=shape):
@@ -222,48 +277,21 @@ class KoharuTests(unittest.TestCase):
                 raw[20:40, 52:70] = 255
                 instance = torch.from_numpy(np.where(raw > 0, 2., -2.).astype(np.float32))
                 self.output['pred_masks'] = instance[None, None].expand(1, 300, *shape)
-                detector.updateParam('label', {'text': True, 'onomatopoeia': False})
-                y, x = np.ogrid[-radius:radius+1, -radius:radius+1]
-                disk = (x*x + y*y <= radius*radius).astype(np.uint8)
-                expected = cv2.morphologyEx(cv2.dilate(raw, disk), cv2.MORPH_CLOSE, disk)
-                mask, blocks = detector.detect(np.zeros((*shape, 3), np.uint8))
-                np.testing.assert_array_equal(mask, expected)
+                self.detector.updateParam('label', {'text': True, 'onomatopoeia': False})
+                mask, blocks = self.detector.detect(np.zeros((*shape, 3), np.uint8))
+                np.testing.assert_array_equal(mask, expected_cleanup(raw, radius))
                 self.assertEqual([b.label for b in blocks], ['text'])
                 self.assertEqual(mask.dtype, np.uint8)
                 self.assertEqual(mask[0, 0], 255)
                 self.assertEqual(mask[-1, -1], 255)
 
-    def test_ctd_cleanup_uses_selected_predictions_and_applies_extra_radius_once(self) -> None:
-        from ballontranslator.modules.textdetector.ctd.textmask import refine_mask
-
-        self.img[:] = 255
-        raw = self.expected_mask(0)
-        self.img[raw > 0] = 0
-        self.detector.updateParam('label', {'text': True, 'onomatopoeia': False})
-        _, original = self.detector.detect(self.img)
-        self.detector.updateParam('mask postprocessing', 'ctd')
-        self.detector.updateParam('mask dilate size', 2)
+    def test_cleanup_preserves_empty_instance_masks(self) -> None:
+        self.output['pred_masks'].fill_(-2.)
         mask, blocks = self.detector.detect(self.img)
-        expected = cv2.dilate(refine_mask(self.img, raw, original),
-                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-        np.testing.assert_array_equal(mask, expected)
-        self.assertTrue(mask.any())
-        self.assertFalse(mask[:, 50:].any())
-        self.assertEqual([b.xyxy for b in blocks], [b.xyxy for b in original])
-        self.assertEqual([b.label for b in blocks], ['text'])
-
-    def test_cleanup_modes_preserve_empty_predictions_and_disabled_labels(self) -> None:
-        for mode in ('dilate', 'koharu', 'ctd'):
-            with self.subTest(mode=mode):
-                self.detector.updateParam('mask postprocessing', mode)
-                for labels in ({'text': True, 'onomatopoeia': True},
-                               {'text': False, 'onomatopoeia': False}):
-                    self.detector.updateParam('label', labels)
-                    self.output['pred_masks'].fill_(-2.)
-                    mask, _ = self.detector.detect(self.img)
-                    self.assertFalse(mask.any())
-                    self.assertEqual(mask.dtype, np.uint8)
-                    self.assertEqual(mask.shape, self.img.shape[:2])
+        self.assertEqual(len(blocks), 2)
+        self.assertFalse(mask.any())
+        self.assertEqual(mask.dtype, np.uint8)
+        self.assertEqual(mask.shape, self.img.shape[:2])
 
     def test_boxes_clip_to_page_and_degenerate_boxes_are_ignored(self) -> None:
         self.output['pred_boxes'][0, 0] = torch.tensor([0, 0, .5, .5])
@@ -271,7 +299,7 @@ class KoharuTests(unittest.TestCase):
         mask, blocks = self.detector.detect(self.img)
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0].xyxy, [0, 0, 20, 10])
-        np.testing.assert_array_equal(mask, self.expected_mask(0))
+        np.testing.assert_array_equal(mask, expected_cleanup(self.expected_mask(0)))
 
     def test_mask_lines_determine_direction_rotation_and_ocr_geometry(self) -> None:
         self.detector.num_select = 1
@@ -287,7 +315,7 @@ class KoharuTests(unittest.TestCase):
                 }
                 image = np.repeat(np.where(foreground, 0, 255).astype(np.uint8)[..., None], 3, axis=2)
                 mask, (block,) = self.detector.detect(image)
-                np.testing.assert_array_equal(mask, foreground.astype(np.uint8) * 255)
+                np.testing.assert_array_equal(mask, expected_cleanup(foreground.astype(np.uint8) * 255))
                 self.assertEqual(block.src_is_vertical, vertical)
                 self.assertEqual(block.vertical, vertical)
                 expected_angle = 0 if abs(angle) < 3 else angle
@@ -312,7 +340,6 @@ class KoharuTests(unittest.TestCase):
             'pred_masks': torch.from_numpy(np.where(np.stack([text_strips(), text_strips(True)]),
                                                     2., -2.)[None]).float(),
         }
-        self.detector.updateParam('mask postprocessing', 'koharu')
         image = np.full((160, 160, 3), 255, np.uint8)
         _, blocks = self.detector.detect(image)
         self.assertEqual({block.label: block.src_is_vertical for block in blocks},
@@ -353,10 +380,8 @@ class KoharuTests(unittest.TestCase):
     def test_invalid_edits_keep_previous_value_and_loaded_model(self) -> None:
         model = self.detector.model
         for key, value in [('text threshold', float('nan')), ('text threshold', 1.1),
-                           ('onomatopoeia threshold', -.1), ('mask dilate size', -1),
-                           ('mask dilate size', 2.5), ('detect size', 1024),
+                           ('onomatopoeia threshold', -.1), ('detect size', 1024),
                            ('font size multiplier', 0), ('device', 'bad'),
-                           ('mask postprocessing', 'invalid'),
                            ('label', {'text': 'false'}), ('model path', None)]:
             with self.subTest(key=key, value=value):
                 previous = self.detector.get_param_value(key)
@@ -370,15 +395,15 @@ class KoharuTests(unittest.TestCase):
         with patch.object(KoharuDetector.logger, 'warning') as warning:
             detector = KoharuDetector(**{
                 'text threshold': {'value': .6}, 'onomatopoeia threshold': float('inf'),
-                'mask dilate size': -1, 'removed setting': 12,
-                'mask postprocessing': {'value': 'removed mode'},
+                'mask dilate size': 7, 'removed setting': 12,
+                'mask postprocessing': {'value': 'ctd'},
                 'label': {'value': {'text': False, 'onomatopoeia': 'false', 'bubble': True}},
             })
         self.assertTrue(warning.called)
         self.assertEqual(detector.get_param_value('text threshold'), .6)
         self.assertEqual(detector.get_param_value('onomatopoeia threshold'), .3)
-        self.assertEqual(detector.get_param_value('mask dilate size'), 2)
-        self.assertEqual(detector.get_param_value('mask postprocessing'), 'koharu')
+        self.assertNotIn('mask dilate size', detector.params)
+        self.assertNotIn('mask postprocessing', detector.params)
         self.assertEqual(detector.get_param_value('label'), {'text': False, 'onomatopoeia': True})
         self.assertFalse(detector.all_model_loaded())
         self.assertEqual(KoharuDetector().get_param_value('text threshold'), .25)
@@ -389,7 +414,6 @@ class KoharuTests(unittest.TestCase):
             self.detector.updateParam('device', 'cpu')
             self.detector.updateParam('detect size', 1152)
             self.detector.updateParam('text threshold', '.4')
-            self.detector.updateParam('mask postprocessing', 'ctd')
             self.assertIs(self.detector.model, model)
             self.detector.updateParam('device', 'mps')
             self.assertIsNone(self.detector.model)
@@ -447,8 +471,8 @@ spec = TEXTDETECTORS.get_spec('koharu')
 assert spec is not None and not validate_lazy_module_specs([spec])
 assert spec.params['label']['value'] == {'text': True, 'onomatopoeia': True}
 assert spec.params['detect size']['value'] == 1152
-assert spec.params['mask postprocessing']['options'] == ['koharu', 'dilate', 'ctd']
-assert spec.params['mask postprocessing']['value'] == 'koharu'
+assert 'mask postprocessing' not in spec.params
+assert 'mask dilate size' not in spec.params
 assert 'transformers>=5.1,<6' in spec.dependencies
 download, = spec.download_file_list
 assert download['files'] == ['model.safetensors', 'config.json']
@@ -460,18 +484,20 @@ assert not any(name in sys.modules for name in ('torch', 'transformers', 'rfdetr
 '''], capture_output=True, text=True, env=os.environ.copy())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_older_config_gets_defaults_without_changing_ctd(self) -> None:
-        saved = {'ctd': {'mask dilate size': 4}, 'koharu': {'mask dilate size': {'value': 7}}}
-        merge_config_module_params(saved, ['ctd', 'koharu'], TEXTDETECTORS.get)
+    def test_older_config_discards_removed_settings_without_changing_ctd(self) -> None:
+        saved = {'ctd': {'mask dilate size': 4}, 'koharu': {
+            'mask postprocessing': {'value': 'ctd'}, 'mask dilate size': {'value': 7},
+            'text threshold': {'value': .7},
+        }}
+        with patch('ballontranslator.modules.base.LOGGER.warning') as warning:
+            merge_config_module_params(saved, ['ctd', 'koharu'], TEXTDETECTORS.get)
+        warning.assert_any_call('Found invalid koharu config: mask postprocessing')
+        warning.assert_any_call('Found invalid koharu config: mask dilate size')
         self.assertEqual(saved['ctd']['mask dilate size'], 4)
-        self.assertEqual(saved['koharu']['text threshold']['value'], .25)
-        self.assertEqual(saved['koharu']['mask postprocessing']['value'], 'koharu')
-        self.assertEqual(saved['koharu']['mask dilate size']['value'], 7)
-        saved['koharu']['text threshold']['value'] = .7
-        saved['koharu']['mask postprocessing']['value'] = 'ctd'
-        merge_config_module_params(saved, ['ctd', 'koharu'], TEXTDETECTORS.get)
         self.assertEqual(saved['koharu']['text threshold']['value'], .7)
-        self.assertEqual(saved['koharu']['mask postprocessing']['value'], 'ctd')
+        self.assertEqual(saved['koharu']['detect size']['value'], 1152)
+        self.assertNotIn('mask postprocessing', saved['koharu'])
+        self.assertNotIn('mask dilate size', saved['koharu'])
 
     def test_doctest(self) -> None:
         self.assertEqual(doctest.testmod(detector_koharu).failed, 0)

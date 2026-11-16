@@ -120,27 +120,13 @@ class KoharuDetector(TextDetectorBase):
                 'Unchecked types add no blocks or cleanup masks.'
             ),
         },
-        'mask postprocessing': {
-            'type': 'selector', 'options': ['koharu', 'dilate', 'ctd'], 'value': 'koharu',
-            'display_name': 'Mask postprocessing',
-            'description': (
-                'koharu (default): page-scaled dilation then closing, using 6 pixels per 1024 pixels of the long side. '
-                'These are fixed upstream settings; Mask dilation radius is ignored. '
-                'dilate: fixed-radius expansion. ctd: image-color refinement then fixed-radius expansion, '
-                'without loading a CTD model.'
-            ),
-        },
-        'mask dilate size': {
-            'value': 2, 'display_name': 'Mask dilation radius',
-            'description': 'Extra expansion in page pixels for dilate/ctd; 0 disables this expansion. Ignored by koharu.',
-        },
         'font size multiplier': {
             'value': 1.0, 'display_name': 'Font size multiplier',
             'description': 'Scales the fallback size. Auto layout instead fits translated text to the flow area.',
         },
         'description': (
             'Koharu Layout HighRes (RF-DETR). Requires Python 3.10+ and Transformers 5. '
-            'Uses local weights, region boxes and segmentation masks; no CTD model is needed. '
+            'Uses local weights, region boxes and segmentation masks. '
             'Text direction and rotation are inferred from each instance mask. '
             'Some short dialogue may be classified as onomatopoeia.'
         ),
@@ -178,10 +164,6 @@ class KoharuDetector(TextDetectorBase):
                     or any(not isinstance(enabled, bool) for enabled in value.values())):
                 raise ValueError('Labels must specify true/false for text and onomatopoeia')
             return value.copy()
-        if key == 'mask postprocessing':
-            if value not in self.params[key]['options']:
-                raise ValueError('Mask postprocessing must be dilate, koharu or ctd')
-            return value
         if key in {'model path', 'device'}:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f'{key} must be a non-empty string')
@@ -197,13 +179,11 @@ class KoharuDetector(TextDetectorBase):
             raise ValueError(f'{key} must be between 0 and 1')
         if key == 'font size multiplier' and number <= 0:
             raise ValueError('Font size multiplier must be positive')
-        if key in {'detect size', 'mask dilate size'}:
+        if key == 'detect size':
             if not number.is_integer():
                 raise ValueError(f'{key} must be an integer')
-            if key == 'detect size' and int(number) not in self.params[key]['options']:
+            if int(number) not in self.params[key]['options']:
                 raise ValueError('Detect size must be 768, 1152, 1536 or 1920')
-            if key == 'mask dilate size' and not 0 <= number <= 100:
-                raise ValueError('Mask dilation radius must be between 0 and 100')
             return int(number)
         return number
 
@@ -282,7 +262,7 @@ class KoharuDetector(TextDetectorBase):
             std = pixels.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
             output = self.model((pixels - mean) / std)
             mask, blocks = self._postprocess(output, img.shape[:2])
-        return self._refine_mask(img, mask, blocks), blocks
+        return self._refine_mask(mask), blocks
 
     def _postprocess(
         self, output: Dict[str, 'torch.Tensor'], image_shape: Tuple[int, int],
@@ -321,6 +301,7 @@ class KoharuDetector(TextDetectorBase):
         # Transfer native masks once; projecting one at a time avoids an N-by-page allocation.
         masks = output['pred_masks'][0, queries].cpu()
         native_masks = masks.numpy() > 0
+        mask_scale = np.array([native_masks.shape[2] / width, native_masks.shape[1] / height])
         bubbles = sorted((i for i, label in enumerate(labels) if label == 2),
                          key=lambda i: np.count_nonzero(native_masks[i]))
         associations = {i: [] for i in bubbles}
@@ -353,55 +334,51 @@ class KoharuDetector(TextDetectorBase):
             block.font_size = max(1., min(x2 - x1, y2 - y1) * .25) * multiplier
             block._detected_font_size = -1
             blocks.append(block)
-            foreground_y, foreground_x = np.nonzero(native_masks[index])
+            if not bubbles:
+                continue
+            # Keep cells intersecting the text box; outliers must not guide bubble layout.
+            mx1, my1 = np.floor(np.array([x1, y1]) * mask_scale).astype(int)
+            mx2, my2 = np.ceil(np.array([x2, y2]) * mask_scale).astype(int)
+            text_mask = native_masks[index]
+            text_mask[:my1] = text_mask[my2:] = False
+            text_mask[:, :mx1] = text_mask[:, mx2:] = False
+            foreground_y, foreground_x = np.nonzero(text_mask)
             foreground_count = len(foreground_x)
             if foreground_count:
                 for bubble in bubbles:
                     if np.count_nonzero(native_masks[bubble, foreground_y, foreground_x]) >= .9 * foreground_count:
-                        associations[bubble].append(block)
+                        associations[bubble].append((block, index))
                         break
         for bubble, members in associations.items():
             if not members:
                 continue
             bubble_mask = native_masks[bubble]
             if len(members) == 1:
-                members[0].bubble_shape = trace_bubble(
-                    bubble_mask, (width, height), members[0].angle, tuple(members[0].center()))
-                members[0].bubble_layout = members[0].bubble_shape is not None
-                continue
-            anchors = np.array([(np.array(b.xyxy[:2]) + b.xyxy[2:]) / 2 for b in members])
-            for block, cell in zip(members, partition_bubble(bubble_mask, (width, height), anchors)):
-                block.bubble_shape = trace_bubble(cell, (width, height), block.angle, tuple(block.center()))
+                cells = [bubble_mask]
+            else:
+                anchors = np.array([(np.array(b.xyxy[:2]) + b.xyxy[2:]) / 2 for b, _ in members])
+                cells = partition_bubble(bubble_mask, (width, height), anchors)
+            for (block, index), cell in zip(members, cells):
+                block.bubble_shape = trace_bubble(cell, (width, height), block.angle, native_masks[index])
                 block.bubble_layout = block.bubble_shape is not None
         return mask, sort_regions(blocks)
 
-    def _refine_mask(self, img: np.ndarray, mask: np.ndarray, blocks: List[TextBlock]) -> np.ndarray:
+    def _refine_mask(self, mask: np.ndarray) -> np.ndarray:
         """Clean the union of enabled instances without changing detection geometry.
 
         >>> detector = KoharuDetector()
         >>> mask = np.zeros((16, 16), np.uint8)
         >>> mask[8, 8] = 255
-        >>> cleaned = detector._refine_mask(np.zeros((16, 16, 3), np.uint8), mask, [])
+        >>> cleaned = detector._refine_mask(mask)
         >>> int(np.count_nonzero(cleaned)), int(np.count_nonzero(mask))
         (5, 1)
         """
         if not mask.any():
             return mask
-        mode = self.get_param_value('mask postprocessing')
-        if mode == 'koharu':
-            radius = min(255, max(1, math.floor(max(mask.shape) * 6 / 1024 + 0.5)))
-            # Full-page L2 morphology preserves interactions and page-edge neighborhoods.
-            for _ in range(2):
-                distance = cv2.distanceTransform(255 - mask, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-                mask = (distance <= radius).astype(np.uint8) * 255
-            distance = cv2.distanceTransform(mask, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-            return (distance > radius).astype(np.uint8) * 255
-        if mode == 'ctd':
-            from .ctd.textmask import refine_mask
-
-            mask = refine_mask(img, mask, blocks)
-        radius = self.get_param_value('mask dilate size')
-        if radius > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
-            mask = cv2.dilate(mask, kernel)
-        return mask
+        radius = min(255, max(1, math.floor(max(mask.shape) * 6 / 1024 + 0.5)))
+        # Full-page L2 morphology preserves interactions and page-edge neighborhoods.
+        for _ in range(2):
+            distance = cv2.distanceTransform(255 - mask, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+            mask = (distance <= radius).astype(np.uint8) * 255
+        distance = cv2.distanceTransform(mask, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        return (distance > radius).astype(np.uint8) * 255
