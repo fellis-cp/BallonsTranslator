@@ -28,6 +28,9 @@ logs
 TRANSLATED/
 ballontrans_pylibs_win
 localtmp*
+gemini_profile*/
+deepseek_profile*/
+aistudio_profile*/
 
 .vscode
 .VSCodeCounter
@@ -68,3 +71,4 @@ Ultralytics/settings.json
 # Spellcheck dictionaries
 data/dictionaries/
 
+READER/favorites.json

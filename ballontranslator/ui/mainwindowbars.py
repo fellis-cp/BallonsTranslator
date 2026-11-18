@@ -40,6 +40,7 @@ from ballontranslator.utils.shared import (
     WINDOW_BORDER_WIDTH,
 )
 from .framelesswindow import FramelessMoveResize
+from .audio_player import PageAudioPlayer, AudioControlWidget
 from ballontranslator.utils.config import pcfg
 from ballontranslator.utils import shared
 if shared.FLAG_QT6:
@@ -383,6 +384,20 @@ class TitleBar(Widget):
         viewMenu.addSeparator()
         viewMenu.addAction(importTextStyles)
         viewMenu.addAction(exportTextStyles)
+
+        audio_player = getattr(self.mainwindow, 'audio_player', None)
+        if audio_player is None:
+            audio_player = PageAudioPlayer(self)
+        self.audioControlWidget = AudioControlWidget(audio_player, self)
+
+        viewMenu.addSeparator()
+        self.audioAutoplayAction = QAction(self.tr('Auto-play Page Audio'), self)
+        self.audioAutoplayAction.setCheckable(True)
+        self.audioAutoplayAction.setChecked(self.audioControlWidget.player.autoplay)
+        self.audioAutoplayAction.toggled.connect(self.audioControlWidget.on_autoplay_toggled)
+        self.audioControlWidget.player.autoplay_changed.connect(self.audioAutoplayAction.setChecked)
+        viewMenu.addAction(self.audioAutoplayAction)
+
         self.viewToolBtn.setMenu(viewMenu)
         self.viewToolBtn.setPopupMode(QToolButton.InstantPopup)
         self.textedit_trigger = texteditAction.triggered
@@ -486,6 +501,7 @@ class TitleBar(Widget):
         hlayout.addStretch()
         hlayout.addWidget(self.titleLabel)
         hlayout.addStretch()
+        hlayout.addWidget(self.audioControlWidget)
         hlayout.setContentsMargins(0, 0, 0, 0)
 
         if not shared.ON_MACOS:

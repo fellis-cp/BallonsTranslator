@@ -3097,3 +3097,129 @@ QWidget#suggestion_popup QScrollBar::sub-page:horizontal {
     width: 0px;
     background: transparent;
 }
+
+QWidget#AudioControlWidget {
+    background-color: @widgetBackgroundColor;
+    border: 1px solid @borderColor;
+    border-radius: 14px;
+    padding-left: 4px;
+    padding-right: 6px;
+}
+
+QToolButton#AudioPlayButton {
+    background-color: rgb(30, 147, 229);
+    color: white;
+    border: none;
+    border-radius: 11px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-weight: bold;
+    min-width: 62px;
+    height: 22px;
+}
+
+QToolButton#AudioPlayButton:hover {
+    background-color: rgb(24, 130, 205);
+}
+
+QToolButton#AudioPlayButton:pressed {
+    background-color: rgb(18, 110, 175);
+}
+
+QToolButton#AudioPlayButton[isPlaying="false"] {
+    background-color: rgba(30, 147, 229, 0.15);
+    color: rgb(30, 147, 229);
+    border: 1px solid rgb(30, 147, 229);
+}
+
+QToolButton#AudioPlayButton[isPlaying="false"]:hover {
+    background-color: rgba(30, 147, 229, 0.28);
+}
+
+QToolButton#AudioPlayButton:disabled {
+    background-color: transparent;
+    color: @titleBarColor;
+    border: 1px solid @borderColor;
+    opacity: 0.45;
+}
+
+QToolButton#AudioReplayButton,
+QToolButton#AudioMuteButton {
+    border: none;
+    border-radius: 11px;
+    background-color: transparent;
+    padding: 2px;
+    width: 22px;
+    height: 22px;
+}
+
+QToolButton#AudioReplayButton:hover,
+QToolButton#AudioMuteButton:hover {
+    background-color: rgba(30, 147, 229, 0.2);
+}
+
+QToolButton#AudioReplayButton:disabled,
+QToolButton#AudioMuteButton:disabled {
+    opacity: 0.4;
+}
+
+QLabel#AudioTrackLabel {
+    font-size: 11px;
+    font-weight: 500;
+    color: @titleBarColor;
+    padding-left: 2px;
+    padding-right: 2px;
+}
+
+QLabel#AudioTimeLabel {
+    font-size: 10px;
+    color: @titleBarColor;
+    opacity: 0.85;
+}
+
+QLabel#AudioVolLabel {
+    font-size: 11px;
+    font-weight: 600;
+    color: @titleBarColor;
+    min-width: 32px;
+}
+
+QLabel#AudioVolLabel:hover {
+    color: rgb(30, 147, 229);
+}
+
+QSlider#AudioVolumeSlider {
+    max-height: 18px;
+    min-height: 18px;
+    background: transparent;
+}
+
+QSlider#AudioVolumeSlider::groove:horizontal {
+    height: 4px;
+    background: @borderColor;
+    border-radius: 2px;
+}
+
+QSlider#AudioVolumeSlider::sub-page:horizontal {
+    background: rgb(30, 147, 229);
+    border-radius: 2px;
+}
+
+QSlider#AudioVolumeSlider::handle:horizontal {
+    background: @titleBarColor;
+    width: 12px;
+    height: 12px;
+    margin-top: -4px;
+    margin-bottom: -4px;
+    border-radius: 6px;
+    border: 1px solid @borderColor;
+}
+
+QSlider#AudioVolumeSlider::handle:horizontal:hover {
+    background: rgb(30, 147, 229);
+    border-color: rgb(30, 147, 229);
+}
+
+QSlider#AudioVolumeSlider::handle:horizontal:pressed {
+    background: rgb(18, 110, 175);
+}

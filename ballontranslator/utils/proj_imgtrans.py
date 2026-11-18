@@ -210,6 +210,11 @@ class ProjImgTrans:
             os.makedirs(self.inpainted_dir())
         if not osp.exists(self.mask_dir()):
             os.makedirs(self.mask_dir())
+        if self.directory and not osp.exists(self.audio_dir()):
+            try:
+                os.makedirs(self.audio_dir(), exist_ok=True)
+            except OSError:
+                pass
 
         return new_proj
 
@@ -225,6 +230,77 @@ class ProjImgTrans:
     def assets_dir(self) -> str:
         """Return the project-owned directory for reusable immutable assets."""
         return osp.join(self.directory, 'assets')
+
+    def audio_dir(self) -> str:
+        """Return the project-owned directory for page audio files.
+
+        >>> proj = ProjImgTrans()
+        >>> proj.directory = '/tmp/my_proj'
+        >>> proj.audio_dir()
+        '/tmp/my_proj/audio'
+        """
+        return osp.join(self.directory, 'audio') if self.directory else ''
+
+    def get_page_audio_path(self, imgname: Optional[str] = None) -> Optional[str]:
+        """Find the audio file corresponding to a page strictly inside audio/.
+
+        Supported extensions: .mp3, .wav, .ogg, .m4a, .flac, .aac, .opus, .wma.
+        Matches stem + ext, imgname + ext, exact filename, or case-insensitive match.
+        Checks both the project root audio/ directory and any language-specific
+        subfolder audio/ directory (e.g. when opened via READER).
+        """
+        if not self.directory:
+            return None
+        target = imgname if imgname is not None else self.current_img
+        if not target:
+            return None
+
+        candidate_dirs = []
+        root_audio = self.audio_dir()
+        if root_audio:
+            candidate_dirs.append(root_audio)
+        if self.proj_path:
+            sub_audio = osp.join(osp.dirname(self.proj_path), 'audio')
+            if sub_audio not in candidate_dirs:
+                candidate_dirs.append(sub_audio)
+
+        audio_exts = ('.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.opus', '.wma')
+        stem = osp.splitext(target)[0]
+        stem_lower = stem.lower()
+        target_lower = target.lower()
+
+        for adir in candidate_dirs:
+            if not osp.isdir(adir):
+                continue
+
+            # Priority 1: stem + audio extension (e.g. '01.mp3' for '01.png')
+            for ext in audio_exts:
+                p = osp.join(adir, stem + ext)
+                if osp.isfile(p):
+                    return p
+
+            # Priority 2: full name + audio extension (e.g. '01.png.mp3')
+            for ext in audio_exts:
+                p = osp.join(adir, target + ext)
+                if osp.isfile(p):
+                    return p
+
+            # Priority 3: exact name match (e.g. if target itself is '01.mp3')
+            p = osp.join(adir, target)
+            if osp.isfile(p):
+                return p
+
+            # Priority 4: case-insensitive match
+            try:
+                for entry in os.listdir(adir):
+                    entry_stem, entry_ext = osp.splitext(entry)
+                    if entry_ext.lower() in audio_exts:
+                        if entry_stem.lower() == stem_lower or entry.lower() == target_lower:
+                            return osp.join(adir, entry)
+            except OSError:
+                pass
+
+        return None
 
     def _resolved_assets_root(self, *, create: bool = False) -> str:
         """Return the real assets root only when it stays in the project."""

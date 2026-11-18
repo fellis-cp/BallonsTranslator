@@ -434,6 +434,9 @@ class ProgramConfig(Config):
     show_inpainter_tool: bool = True
     run_pipeline_mode: str = 'pipeline'
     render_without_text_style_update: bool = False
+    audio_autoplay: bool = True
+    audio_volume: int = 100
+    audio_muted: bool = False
 
     let_fntsize_flag: int = 0
     let_fntstroke_flag: int = 0
@@ -585,6 +588,24 @@ class ProgramConfig(Config):
                 )
                 config_dict.pop('global_fontformat')
         warn_ignored_legacy_effects(effect_notices, 'program config')
+
+        if 'audio_volume' in config_dict:
+            vol = config_dict['audio_volume']
+            if not isinstance(vol, int) or isinstance(vol, bool) or not (0 <= vol <= 100):
+                LOGGER.warning('Discard invalid audio_volume config: %r.', vol)
+                config_dict.pop('audio_volume', None)
+
+        if 'audio_autoplay' in config_dict:
+            autoplay = config_dict['audio_autoplay']
+            if not isinstance(autoplay, bool):
+                LOGGER.warning('Discard invalid audio_autoplay config: %r.', autoplay)
+                config_dict.pop('audio_autoplay', None)
+
+        if 'audio_muted' in config_dict:
+            muted = config_dict['audio_muted']
+            if not isinstance(muted, bool):
+                LOGGER.warning('Discard invalid audio_muted config: %r.', muted)
+                config_dict.pop('audio_muted', None)
 
         config = ProgramConfig(**config_dict)
         portable_effects = without_project_raster_effects(

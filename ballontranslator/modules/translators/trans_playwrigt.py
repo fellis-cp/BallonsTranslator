@@ -841,6 +841,9 @@ class BaseBrowserWorker(threading.Thread):
     def _send_text_to_chat(self, page: Any, input_sel: str, text: str, stop_event: Optional[threading.Event] = None) -> bool:
         if (stop_event and stop_event.is_set()) or self.cancel_requested:
             return False
+        dismiss_fn = getattr(self, "_dismiss_modals", None)
+        if callable(dismiss_fn):
+            dismiss_fn(page)
         page.click(input_sel)
         time.sleep(0.2)
         if (stop_event and stop_event.is_set()) or self.cancel_requested:
@@ -879,6 +882,31 @@ class BaseBrowserWorker(threading.Thread):
             except Exception as reload_err:
                 logger.debug(f"{self.LOG_PREFIX} {self.instance_id}: Reload also failed: {reload_err}")
 
+    def _is_user_element(self, el: Any) -> bool:
+        """Check if *el* belongs to a user prompt container or input field."""
+        try:
+            return bool(el.evaluate(
+                """(node) => {
+                    const userSel = 'ms-prompt-box, textarea, input, .chat-turn-container.user, ms-chat-turn.user, [data-role="user"], .user-query-container, .user-query, .ds-user-message, .row.usr, .user-turn';
+                    return !!node.closest(userSel) || (node.matches && node.matches(userSel));
+                }"""
+            ))
+        except Exception:
+            return False
+
+    def _is_generating(self, page: Any) -> bool:
+        """Check whether the model is actively streaming or generating in the UI."""
+        if page is None:
+            return False
+        try:
+            if self.STOP_SEL:
+                for btn in page.query_selector_all(self.STOP_SEL):
+                    if btn.is_visible():
+                        return True
+        except Exception:
+            pass
+        return False
+
     def _extract_all_candidate_texts(self, page: Any) -> List[str]:
         """Query all possible response containers, code blocks, and markdown nodes on the page."""
         selectors = [
@@ -887,7 +915,6 @@ class BaseBrowserWorker(threading.Thread):
             "ms-code-block",
             "code-block",
             ".code-block",
-            "ms-chat-turn",
             "message-content",
         ]
         seen_texts: Set[str] = set()
@@ -898,6 +925,8 @@ class BaseBrowserWorker(threading.Thread):
             try:
                 for el in (page.query_selector_all(sel) or []):
                     try:
+                        if self._is_user_element(el):
+                            continue
                         t = el.inner_text()
                         if t and t.strip() and t.strip() not in seen_texts:
                             seen_texts.add(t.strip())
@@ -1073,7 +1102,7 @@ class BaseBrowserWorker(threading.Thread):
             last_length = 0
             last_growth_time = time.time()
             max_poll_time = max(task.timeout, _calculate_timeout(task.src_list, base_timeout=task.timeout))
-            stable_threshold_s = 1.0
+            stable_threshold_s = 1.5
             no_growth_timeout = 30.0
 
             logger.info(f"{self.LOG_PREFIX} {self.instance_id}: Waiting for response (Max {max_poll_time}s)...")
@@ -1109,15 +1138,6 @@ class BaseBrowserWorker(threading.Thread):
                 other_cands.sort(key=len, reverse=True)
                 cands_to_check = matching_cands + other_cands
 
-                # Fast path across current turn's candidate elements
-                for cand in cands_to_check:
-                    raw_json = _extract_json_block(cand)
-                    if raw_json:
-                        data = _parse_or_repair_json(raw_json, self.instance_id)
-                        if data and "translations" in data and len(data["translations"]) == len(input_elements):
-                            logger.info(f"{self.LOG_PREFIX} {self.instance_id}: [FAST-RESULT] Complete valid response received.")
-                            return _build_results(task.src_list, data["translations"])
-
                 current_text = cands_to_check[0] if cands_to_check else ""
                 current_length = len(current_text)
 
@@ -1127,7 +1147,27 @@ class BaseBrowserWorker(threading.Thread):
                     last_growth_time = time.time()
                     continue
 
+                is_generating = self._is_generating(page)
+                if is_generating:
+                    last_growth_time = time.time()
+                    continue
+
                 wall_stable = time.time() - last_growth_time
+
+                # Strict fast path: ONLY when strictly valid, complete JSON has closed and UI is not generating
+                if not is_generating and current_length > 0:
+                    for cand in cands_to_check:
+                        raw_json = _extract_json_block(cand)
+                        if raw_json:
+                            try:
+                                parsed = json.loads(raw_json)
+                                data = _extract_translations_from_data(parsed)
+                                if data and "translations" in data and len(data["translations"]) == len(input_elements):
+                                    logger.info(f"{self.LOG_PREFIX} {self.instance_id}: [FAST-RESULT] Complete valid response received.")
+                                    return _build_results(task.src_list, data["translations"])
+                            except Exception:
+                                pass
+
                 if current_length > 0 and wall_stable > no_growth_timeout and batch_token not in current_text and not _extract_json_block(current_text):
                     logger.warning(f"{self.LOG_PREFIX} {self.instance_id}: Response stalled for {wall_stable:.1f}s without batch token.")
                     break
@@ -1305,16 +1345,6 @@ class BaseBrowserWorker(threading.Thread):
                     other_cands.sort(key=len, reverse=True)
                     cands_to_check = matching_cands + other_cands
 
-                    for cand in cands_to_check:
-                        raw_json = _extract_json_block(cand)
-                        if raw_json:
-                            data = _parse_or_repair_json(raw_json, self.instance_id)
-                            if data and "translations" in data and len(data["translations"]) > 0:
-                                item_trans = data["translations"][0].get("translation", "")
-                                break
-                    if item_trans is not None:
-                        break
-
                     current_text = cands_to_check[0] if cands_to_check else ""
                     current_length = len(current_text)
 
@@ -1323,8 +1353,30 @@ class BaseBrowserWorker(threading.Thread):
                         last_growth_time = time.time()
                         continue
 
+                    is_generating = self._is_generating(page)
+                    if is_generating:
+                        last_growth_time = time.time()
+                        continue
+
                     wall_stable = time.time() - last_growth_time
-                    if current_length > 0 and wall_stable >= 1.0:
+
+                    # Strict JSON fast path (only when closed and not generating)
+                    if not is_generating and current_length > 0:
+                        for cand in cands_to_check:
+                            raw_json = _extract_json_block(cand)
+                            if raw_json:
+                                try:
+                                    parsed = json.loads(raw_json)
+                                    data = _extract_translations_from_data(parsed)
+                                    if data and "translations" in data and len(data["translations"]) > 0:
+                                        item_trans = data["translations"][0].get("translation", "")
+                                        break
+                                except Exception:
+                                    pass
+                        if item_trans is not None:
+                            break
+
+                    if wall_stable >= 1.0 and current_length > 0:
                         for cand in cands_to_check:
                             raw_json = _extract_json_block(cand)
                             if raw_json:
@@ -1382,9 +1434,48 @@ class GeminiBrowserWorker(BaseBrowserWorker):
     SEND_WITH_ENTER = True
     LOG_PREFIX = "Instance"
 
+    def _dismiss_modals(self, page: Any) -> None:
+        """Dismiss standard Gemini dialogs, welcome popups, and 'Clear current chat' confirmations."""
+        try:
+            selectors = [
+                # Confirmation buttons to clear chat / create new one
+                "button:has-text('Reset')",
+                "button:has-text('Clear')",
+                "button:has-text('Clear chat')",
+                "button:has-text('Hapus')",
+                "button:has-text('Hapus chat')",
+                "button:has-text('Confirm')",
+                "button:has-text('Create new chat')",
+                "button:has-text('Buat chat baru')",
+                "button:has-text('Continue')",
+                "button:has-text('Lanjutkan')",
+                "button:has-text('Got it')",
+                "button:has-text('Mengerti')",
+                "button:has-text('Agree and continue')",
+                "button:has-text('Accept')",
+                "button[aria-label*='Dismiss']",
+                "button[aria-label*='Close dialog']",
+                "button[aria-label*='Tutup dialog']",
+                "mat-dialog-container button:has-text('Clear')",
+                "mat-dialog-container button:has-text('Reset')",
+                "[data-test-id='confirm-button']",
+            ]
+            for sel in selectors:
+                for btn in (page.query_selector_all(sel) or []):
+                    if btn.is_visible():
+                        btn.click()
+                        time.sleep(0.3)
+        except Exception:
+            pass
+
+    def _safe_goto(self, page: Any, url: str, wait_extra: bool = False):
+        super()._safe_goto(page, url, wait_extra=wait_extra)
+        self._dismiss_modals(page)
+
     def _start_new_chat(self, page: Any) -> bool:
         """Quickly reset chat context via UI without full page reload."""
         try:
+            self._dismiss_modals(page)
             new_chat_btn = page.query_selector(
                 "button[aria-label*='New chat'], button[aria-label*='Chat baru'], "
                 "button[aria-label*='Neue Unterhaltung'], a[href='/app'], "
@@ -1393,6 +1484,7 @@ class GeminiBrowserWorker(BaseBrowserWorker):
             if new_chat_btn and new_chat_btn.is_visible():
                 new_chat_btn.click()
                 time.sleep(0.4)
+                self._dismiss_modals(page)
                 if self.INPUT_SEL:
                     page.wait_for_selector(self.INPUT_SEL, timeout=5000)
                 return True
@@ -1420,24 +1512,46 @@ class AIStudioBrowserWorker(GeminiBrowserWorker):
     INPUT_SEL = (
         'ms-prompt-box ms-autosize-textarea textarea, '
         'ms-prompt-box textarea[aria-label="Enter a prompt"], '
-        "ms-prompt-box textarea, "
-        'textarea[aria-label="Enter a prompt"]'
+        'ms-prompt-box textarea, '
+        'textarea[aria-label="Enter a prompt"], '
+        'textarea[placeholder*="prompt"], '
+        'ms-prompt-box [contenteditable="true"], '
+        'div[contenteditable="true"]'
     )
     RESPONSE_SEL = (
         "ms-chat-turn .chat-turn-container.model, "
-        "ms-chat-turn ms-cmark-node, "
-        "ms-chat-turn ms-text-chunk, "
-        "ms-chat-turn .markdown"
+        "ms-chat-turn .chat-turn-container.model ms-cmark-node, "
+        "ms-chat-turn .chat-turn-container.model ms-text-chunk, "
+        "ms-chat-turn .chat-turn-container.model .markdown, "
+        "ms-chat-turn .chat-turn-container.model pre code, "
+        "ms-chat-turn .chat-turn-container.model ms-code-block, "
+        "ms-chat-turn:not(.user):not(:has(.chat-turn-container.user)) .chat-turn-container, "
+        ".chat-turn-container.model"
     )
     STOP_SEL = (
         'ms-prompt-box button[aria-label*="Stop"], '
         'button[aria-label*="Stop"], '
-        "ms-run-button button[aria-label*='Stop']"
+        'button[aria-label*="Stop streaming"], '
+        'button[aria-label*="Stop stream"], '
+        'button[aria-label*="Stop generating"], '
+        'button[aria-label*="Cancel run"], '
+        'button[aria-label*="Cancel"], '
+        'ms-run-button button[aria-label*="Stop"], '
+        'ms-run-button button:has-text("Stop"), '
+        'ms-run-button button.stop, '
+        'ms-run-button .mat-mdc-progress-spinner, '
+        'mat-progress-spinner, '
+        'ms-progress-bar, '
+        'mat-spinner'
     )
     SEND_SEL = (
         'ms-prompt-box ms-run-button button[aria-label="Run"], '
+        'ms-prompt-box ms-run-button button, '
         'ms-prompt-box button[aria-label="Run"][type="submit"], '
+        'ms-prompt-box button[aria-label="Run"], '
+        'ms-run-button button[aria-label="Run"], '
         'button[aria-label="Run"].run-button, '
+        'button:has-text("Run"), '
         'ms-run-button button[type="submit"]'
     )
     INPUT_WAIT_MS = 120000
@@ -1454,6 +1568,22 @@ class AIStudioBrowserWorker(GeminiBrowserWorker):
     # Pacing between prompts (seconds) with natural, fast anti-bot jitter.
     GAP_MIN_S = 1.0
     GAP_MAX_S = 2.5
+
+    def _is_generating(self, page: Any) -> bool:
+        """Check whether AI Studio is actively generating a response."""
+        if page is None:
+            return False
+        if super()._is_generating(page):
+            return True
+        try:
+            spinner = page.query_selector(
+                "ms-run-button mat-spinner, ms-run-button mat-progress-spinner, ms-progress-bar, .mat-mdc-progress-spinner"
+            )
+            if spinner and spinner.is_visible():
+                return True
+        except Exception:
+            pass
+        return False
 
     def __init__(self, profile_dir: str, instance_id: int, repair_worker: Optional[JsonRepairWorker] = None):
         super().__init__(profile_dir, instance_id, repair_worker=repair_worker)
@@ -1771,28 +1901,38 @@ class DeepSeekBrowserWorker(BaseBrowserWorker):
                     if not current_text:
                         continue
 
-                    # Fast path: complete valid JSON received
-                    raw_json = _extract_json_block(current_text)
-                    if raw_json:
-                        data = _parse_or_repair_json(raw_json, self.instance_id)
-                        if data and "translations" in data and len(data["translations"]) == len(input_elements):
-                            logger.info(f"DeepSeek Instance {self.instance_id}: [FAST-RESULT] Complete valid response received.")
-                            return _build_results(task.src_list, data["translations"])
-
                     if len(current_text) > last_length:
                         last_length = len(current_text)
                         last_growth_time = time.time()
                         stable_checks = 0
                         continue
 
+                    is_generating = self._is_generating(page)
+                    if is_generating:
+                        last_growth_time = time.time()
+                        continue
+
                     wall_stable = time.time() - last_growth_time
+
+                    # Fast path: strictly complete valid JSON received and UI is not generating
+                    raw_json = _extract_json_block(current_text)
+                    if not is_generating and wall_stable >= 0.3 and raw_json:
+                        try:
+                            parsed = json.loads(raw_json)
+                            data = _extract_translations_from_data(parsed)
+                            if data and "translations" in data and len(data["translations"]) == len(input_elements):
+                                logger.info(f"DeepSeek Instance {self.instance_id}: [FAST-RESULT] Complete valid response received.")
+                                return _build_results(task.src_list, data["translations"])
+                        except Exception:
+                            pass
+
                     if current_text and wall_stable > no_growth_timeout and batch_token not in current_text and not raw_json:
                         logger.warning(f"DeepSeek Instance {self.instance_id}: Response stalled for {wall_stable:.1f}s.")
                         break
 
                     if current_text:
                         stable_checks += 1
-                        if stable_checks >= 2:
+                        if stable_checks >= 2 and wall_stable >= 1.0:
                             if _is_refusal(current_text):
                                 logger.warning(f"DeepSeek: Refusal detected: \"{current_text[:80]}...\"")
                                 if not is_retry:

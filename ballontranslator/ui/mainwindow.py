@@ -40,6 +40,7 @@ from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 from .canvas import Canvas
 from .configpanel import ConfigPanel
 from .module_manager import ModuleManager
+from .audio_player import PageAudioPlayer
 from .text_engine.editing.widgets import SourceTextEdit, TransTextEdit
 from .drawingpanel import DrawingPanel
 from .text_engine.editing.manager import (
@@ -169,6 +170,7 @@ class MainWindow(mainwindow_cls):
         self._batch_preserve_font_settings = False
         self._batch_active = False
         self._llm_context_dirty = False
+        self.audio_player = PageAudioPlayer(self)
 
         self.setupThread()
         self.setupUi()
@@ -254,6 +256,8 @@ class MainWindow(mainwindow_cls):
         application_stylesheet = parse_stylesheet(theme)
         if self.styleSheet() != application_stylesheet:
             self.setStyleSheet(application_stylesheet)
+        if hasattr(self, 'titleBar') and hasattr(self.titleBar, 'audioControlWidget'):
+            self.titleBar.audioControlWidget.update_icons()
 
     def setupUi(self):
         screen_size = QGuiApplication.primaryScreen().geometry().size()
@@ -329,6 +333,7 @@ class MainWindow(mainwindow_cls):
         # set up canvas
         SW.canvas = self.canvas = Canvas()
         self.canvas.imgtrans_proj = self.imgtrans_proj
+        self.titleBar.audioControlWidget.set_project(self.imgtrans_proj)
         self.llmContextEditor.set_summary_command_pusher(
             self.canvas.push_text_command
         )
@@ -810,6 +815,7 @@ class MainWindow(mainwindow_cls):
             )
             self.canvas.clear_undostack(update_saved_step=True)
             self.titleBar.setTitleContent(osp.basename(directory))
+            self.titleBar.audioControlWidget.set_project(self.imgtrans_proj)
             self.updatePageList()
             self._llm_context_dirty = False
             self.opening_dir = False
@@ -855,6 +861,7 @@ class MainWindow(mainwindow_cls):
             )
             self.canvas.clear_undostack(update_saved_step=True)
             self.leftBar.updateRecentProjList(self.imgtrans_proj.proj_path)
+            self.titleBar.audioControlWidget.set_project(self.imgtrans_proj)
             self.updatePageList()
             self.titleBar.setTitleContent(osp.basename(self.imgtrans_proj.proj_path))
             self._llm_context_dirty = False
@@ -906,6 +913,8 @@ class MainWindow(mainwindow_cls):
         save_config()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if hasattr(self, 'audio_player'):
+            self.audio_player.stop()
         if self.font_change_detector is not None:
             self.font_change_detector.stop()
         self.font_refresh.shutdown()
@@ -1005,6 +1014,12 @@ class MainWindow(mainwindow_cls):
             self.titleBar.setTitleContent(page_name=self.imgtrans_proj.current_img)
             self.module_manager.handle_page_changed()
             self.drawingPanel.handle_page_changed()
+            if hasattr(self, 'audio_player'):
+                audio_path = self.imgtrans_proj.get_page_audio_path(item.text())
+                self.audio_player.load_page_audio(audio_path, autoplay=pcfg.audio_autoplay)
+        else:
+            if hasattr(self, 'audio_player'):
+                self.audio_player.load_page_audio(None)
             
         self.page_changing = False
 

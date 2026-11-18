@@ -218,5 +218,68 @@ class TestPlaywrightSequential(unittest.TestCase):
         extracted = _extract_json_block(text)
         self.assertEqual(extracted, "{'id': 1, 'text': 'nested { braces } here'}")
 
+    def test_is_user_element_filtering(self):
+        class MockElement:
+            def __init__(self, is_user=False, text=""):
+                self.is_user = is_user
+                self.text = text
+
+            def evaluate(self, script):
+                return self.is_user
+
+            def inner_text(self):
+                return self.text
+
+        class MockPage:
+            def query_selector_all(self, selector):
+                return [
+                    MockElement(is_user=True, text='User prompt {"batch_id": "1"}'),
+                    MockElement(is_user=False, text='Model response {"batch_id": "1"}')
+                ]
+
+        worker = AIStudioBrowserWorker("/tmp/profile", 1)
+        texts = worker._extract_all_candidate_texts(MockPage())
+        self.assertEqual(len(texts), 1)
+        self.assertIn("Model response", texts[0])
+
+    def test_batch_waits_while_generating(self):
+        class MockElement:
+            def __init__(self, text):
+                self.text = text
+
+            def evaluate(self, script):
+                return False
+
+            def inner_text(self):
+                return self.text
+
+        class MockPage:
+            def __init__(self):
+                self.sent = False
+                self.polls_after_send = 0
+
+            def wait_for_selector(self, _sel, timeout=0):
+                return None
+
+            def query_selector_all(self, _sel):
+                if not self.sent:
+                    return [MockElement("initial response")]
+                self.polls_after_send += 1
+                if self.polls_after_send < 3:
+                    # Incomplete streaming response during generation
+                    return [MockElement('{"translations":[{"id":1,"translation":"Par')]
+                # Final complete response
+                return [MockElement('{"translations":[{"id":1,"translation":"Part One"}]}')]
+
+        page = MockPage()
+        worker = AIStudioBrowserWorker("/tmp/profile", 1)
+        worker._send_text_to_chat = lambda *_args, **_kwargs: setattr(page, "sent", True) or True
+        # Simulate is_generating=True during the first 2 polls after sending
+        worker._is_generating = lambda p: p.polls_after_send < 3
+
+        task = TranslationTask(["Input"], "Indonesian", "", "English", timeout=5)
+        res = worker._do_translate_batch(page, task)
+        self.assertEqual(res, ["Part One"])
+
 if __name__ == '__main__':
     unittest.main()
