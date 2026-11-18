@@ -49,7 +49,7 @@ class HayaiSupernovaTests(unittest.TestCase):
         self.assertEqual(validate_lazy_module_specs(specs), [])
         self.assertEqual(specs[0].key, "hayai_ocr_v2_7_supernova")
         self.assertIsNotNone(OCR.get_spec(specs[0].key))
-        self.assertIsNotNone(OCR.get_spec("hayai_ocr_v2"))
+        self.assertIsNotNone(OCR.get_spec("mit48px"))
         self.assertEqual(specs[0].params["max_patches"]["value"], 256)
         self.assertEqual(specs[0].params["max_new_tokens"]["value"], 128)
         self.assertIs(specs[0].params["use_cuda_graph"]["value"], True)
